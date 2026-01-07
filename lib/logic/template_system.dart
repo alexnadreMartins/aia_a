@@ -39,6 +39,14 @@ class TemplateSystem {
         {'x': 0.05, 'y': 0.25, 'width': 0.9, 'height': 0.5}
       ]
     },
+    '1_vertical_half_right': {
+       'name': 'Vertical Half Right',
+       'image_count': 1,
+       'is_portrait_only': true,
+       'layout': [
+         {'x': 0.525, 'y': 0.05, 'width': 0.425, 'height': 0.9} 
+       ]
+    },
     
     // --- 2 Photos ---
     '2_side_by_side': {
@@ -188,6 +196,69 @@ class TemplateSystem {
           {'x': 0.36, 'y': 0.53, 'width': 0.28, 'height': 0.42},
           {'x': 0.67, 'y': 0.53, 'width': 0.28, 'height': 0.42}
        ]
+    },
+
+    // --- New THIN / SYMMETRIC Templates (User Request) ---
+    // Spacing: 1.5% (0.015)
+    
+    // 2 Photos
+    '2_thin_side': {
+      'name': 'Side by Side (Thin)',
+      'image_count': 2,
+      'layout': [
+        {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.97}, // 47.75% width
+        {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.97}
+      ]
+    },
+    
+    // 3 Photos
+    '3_thin_1v_2h_left': { // 1 Vertical Left, 2 Horizontal Right
+      'name': '1 Vert, 2 Horirz (Left)',
+      'image_count': 3,
+      'layout': [
+        {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.97}, // Vert Left
+        {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.4775}, // Top Right
+        {'x': 0.5075, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}  // Bot Right
+      ]
+    },
+    '3_thin_1v_2h_right': { // 1 Vertical Right, 2 Horizontal Left
+      'name': '1 Vert, 2 Hor z (Right)',
+      'image_count': 3,
+      'layout': [
+        {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.4775}, // Top Left
+        {'x': 0.015, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}, // Bot Left
+        {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.97}   // Vert Right
+      ]
+    },
+    '3_thin_3cols': {
+      'name': '3 Cols (Thin)',
+      'image_count': 3,
+      'layout': [
+        {'x': 0.015, 'y': 0.015, 'width': 0.313, 'height': 0.97},
+        {'x': 0.343, 'y': 0.015, 'width': 0.313, 'height': 0.97},
+        {'x': 0.671, 'y': 0.015, 'width': 0.313, 'height': 0.97}
+      ]
+    },
+    '3_thin_rows': {
+      'name': '3 Rows (Thin)',
+      'image_count': 3,
+      'layout': [
+        {'x': 0.015, 'y': 0.015, 'width': 0.97, 'height': 0.313},
+        {'x': 0.015, 'y': 0.343, 'width': 0.97, 'height': 0.313},
+        {'x': 0.015, 'y': 0.671, 'width': 0.97, 'height': 0.313}
+      ]
+    },
+
+    // 4 Photos
+    '4_thin_grid': {
+        'name': '2x2 Grid (Thin)',
+        'image_count': 4,
+        'layout': [
+            {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.4775},
+            {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.4775},
+            {'x': 0.015, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}, // Fixed coordinate typo (was 0.525 previously)
+            {'x': 0.5075, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}
+        ]
     }
   };
 

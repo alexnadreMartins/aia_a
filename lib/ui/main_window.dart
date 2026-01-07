@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'widgets/full_screen_viewer.dart';
+import 'widgets/browser_full_screen_viewer.dart';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -10,6 +12,7 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:path/path.dart' as p;
 import 'package:pdf/pdf.dart';
+import 'package:uuid/uuid.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:file_picker/file_picker.dart';
 import '../models/project_model.dart';
@@ -19,6 +22,9 @@ import '../state/asset_state.dart';
 import '../logic/layout_engine.dart';
 import '../logic/template_system.dart';
 import '../logic/export_helper.dart';
+import '../logic/image_loader.dart';
+import 'editor/image_editor_view.dart';
+import '../../logic/cache_provider.dart';
 import 'widgets/photo_manipulator.dart';
 import 'widgets/properties_panel.dart';
 
@@ -34,7 +40,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   final GlobalKey _canvasCaptureKey = GlobalKey();
   final ScrollController _thumbScrollController = ScrollController();
   final TransformationController _transformationController = TransformationController();
-  int _leftDockIndex = 0; // 0 = Fotos, 1 = Assets
+  final FocusNode _canvasFocusNode = FocusNode();
+  int _leftDockIndex = 0;
+  String? _lastSelectedBrowserPath;
+ // 0 = Fotos, 1 = Assets
 
   @override
   void initState() {
@@ -42,6 +51,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     _transformationController.addListener(() {
       final zoom = _transformationController.value.getMaxScaleOnAxis();
       ref.read(projectProvider.notifier).setCanvasScale(zoom);
+    });
+    
+    // Show new project dialog on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+       _showNewProjectDialog(context, ref);
     });
   }
 
@@ -52,103 +66,214 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     super.dispose();
   }
 
+  void _scrollToIndex(int index) {
+     if (!_thumbScrollController.hasClients) return;
+     
+     // Estimated width per item + padding
+     // Assuming average width ~ 180.0 (Width depends on aspect ratio, but auto-scroll is approximate)
+     const double estimatedItemWidth = 180.0;
+     
+     final double targetOffset = index * estimatedItemWidth;
+     final double currentOffset = _thumbScrollController.offset;
+     final double viewport = _thumbScrollController.position.viewportDimension;
+     
+     // Scroll if out of view or close to edge
+     if (targetOffset < currentOffset + 50 || targetOffset > currentOffset + viewport - estimatedItemWidth - 50) {
+        // Center the target
+        double finalOffset = targetOffset - (viewport / 2) + (estimatedItemWidth / 2);
+        
+        // Clamp to bounds (Max extent might be dynamic, but clamp helps safety)
+        if (finalOffset < 0) finalOffset = 0;
+        try {
+           if (finalOffset > _thumbScrollController.position.maxScrollExtent) finalOffset = _thumbScrollController.position.maxScrollExtent;
+        } catch (_) {}
+
+        _thumbScrollController.animateTo(
+          finalOffset, 
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+        );
+     }
+  }
+
+  // --- Shortcuts & Dialogs ---
+
+  void _showNewProjectDialog(BuildContext context, WidgetRef ref) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _NewProjectDialog(
+        onCreate: (width, height, dpi) {
+           // We can use DPI here if needed, e.g. store in project state
+           // Currently initializeProject takes (w, h, count)
+           // TODO: Add DPI to project model if required later
+           ref.read(projectProvider.notifier).initializeProject(width, height, 1);
+           Navigator.pop(context);
+        },
+      ),
+    );
+  }
+  
+  void _handleNewInstance() {
+     try {
+       Process.start(Platform.resolvedExecutable, [], mode: ProcessStartMode.detached);
+     } catch (e) {
+       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erro ao abrir nova instância: $e")));
+     }
+  }
+
+  void _handleDelete(WidgetRef ref, PhotoBookState state) {
+     if (state.selectedPhotoId != null) {
+       ref.read(projectProvider.notifier).removePhoto(state.selectedPhotoId!);
+     } else if (state.project.pages.isNotEmpty) {
+        if (state.multiSelectedPages.isNotEmpty) {
+            ref.read(projectProvider.notifier).removeSelectedPages();
+        } else {
+            // Delete current page if valid
+            ref.read(projectProvider.notifier).removePage(state.project.currentPageIndex);
+        }
+     }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final isProcessing = ref.watch(projectProvider.select((s) => s.isProcessing));
+    final state = ref.watch(projectProvider);
+    final isProcessing = state.isProcessing;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF111111),
-      body: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.keyA, control: true): () {
-            ref.read(projectProvider.notifier).selectAllBrowserPhotos();
-          },
-          const SingleActivator(LogicalKeyboardKey.keyD, control: true): () {
-            ref.read(projectProvider.notifier).deselectAllBrowserPhotos();
-          },
-        },
-        child: Stack(
-          children: [
-          Column(
-            children: [
-              // 1. Toolbar area (Only rebuilds on undo/redo status)
-              Consumer(builder: (context, ref, _) {
-                final canUndo = ref.watch(projectProvider.select((s) => s.canUndo));
-                final canRedo = ref.watch(projectProvider.select((s) => s.canRedo));
-                return _buildToolbar(context, ref, canUndo, canRedo);
-              }),
-              
-              Expanded(
-                child: Row(
-                  children: [
-                    // 2. Left Dock: Photos & Assets
-                    _buildLeftDock(ref),
-                    
-                    // 3. Center: Canvas
-                    Expanded(
-                      child: Container(
-                        color: const Color(0xFF000000), // App background
-                        child: Center(
-                          child: Consumer(builder: (context, ref, _) {
-                             final state = ref.watch(projectProvider);
-                             return _buildCanvas(context, ref, state);
-                          }),
-                        ),
-                      ),
-                    ),
-                    
-                    // 4. Right Dock: Timeline / Photos / Properties
-                    Consumer(builder: (context, ref, _) {
-                       final state = ref.watch(projectProvider);
-                       return _buildDock("Properties & Photos", 300, _buildRightDock(context, ref, state));
-                    }),
-                  ],
-                ),
-              ),
-              
-              // 5. Bottom Dock: Thumbnails (Only rebuilds when pages/index change)
-              Container(
-                height: 140,
-                decoration: BoxDecoration(
-                  color: Colors.grey[200],
-                  border: Border(top: BorderSide(color: Colors.grey[400]!)),
-                ),
-                child: Consumer(builder: (context, ref, _) {
-                   final state = ref.watch(projectProvider);
-                   return _buildThumbnails(ref, state);
-                }),
-              ),
-            ],
+    // Auto-fit when Page Index changes
+    ref.listen<int>(
+      projectProvider.select((s) => s.project.currentPageIndex),
+      (prev, next) {
+        if (prev != next) {
+           WidgetsBinding.instance.addPostFrameCallback((_) {
+              _updateCanvasView(context, ref, ref.read(projectProvider));
+              _scrollToIndex(next);
+           });
+        }
+      }
+    );
+
+    // Auto-fit on Project Load / Creation (Pages added)
+    ref.listen<int>(
+      projectProvider.select((s) => s.project.pages.length),
+      (prev, next) {
+        if (prev == 0 && next > 0) {
+           WidgetsBinding.instance.addPostFrameCallback((_) {
+              _updateCanvasView(context, ref, ref.read(projectProvider));
+           });
+        }
+      }
+    );
+
+
+
+    return CallbackShortcuts(
+      bindings: {
+         const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => _handleSave(context, ref),
+         const SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true): () => _handleSaveAs(context, ref),
+         const SingleActivator(LogicalKeyboardKey.keyN, control: true): () => _showNewProjectDialog(context, ref),
+         const SingleActivator(LogicalKeyboardKey.keyN, control: true, shift: true): _handleNewInstance,
+         const SingleActivator(LogicalKeyboardKey.delete): () => ref.read(projectProvider.notifier).deleteSelectedPhoto(),
+         const SingleActivator(LogicalKeyboardKey.keyC, control: true): () => ref.read(projectProvider.notifier).copySelectedPhoto(),
+         const SingleActivator(LogicalKeyboardKey.keyX, control: true): () => ref.read(projectProvider.notifier).cutSelectedPhoto(),
+         const SingleActivator(LogicalKeyboardKey.keyV, control: true): () => ref.read(projectProvider.notifier).pastePhoto(),
+         
+         // Navigation & Layout Shortcuts
+         const SingleActivator(LogicalKeyboardKey.arrowRight): () => ref.read(projectProvider.notifier).nextPage(),
+         const SingleActivator(LogicalKeyboardKey.arrowLeft): () => ref.read(projectProvider.notifier).previousPage(),
+         const SingleActivator(LogicalKeyboardKey.arrowUp): () => ref.read(projectProvider.notifier).cycleAutoLayout(),
+         const SingleActivator(LogicalKeyboardKey.arrowDown): () => ref.read(projectProvider.notifier).cycleAutoLayout(),
+      },
+      child: Focus(
+        autofocus: true, 
+        child: Scaffold(
+          backgroundColor: const Color(0xFF1E1E1E),
+          body: Stack(
+             children: [
+               Column(
+                 children: [
+                   // Top Bar
+                   Container(
+                     height: 48,
+                     decoration: const BoxDecoration(
+                       gradient: LinearGradient(
+                         colors: [Color(0xFF2C2C2C), Color(0xFF1E1E1E)],
+                         begin: Alignment.topCenter,
+                         end: Alignment.bottomCenter,
+                       ),
+                       border: Border(bottom: BorderSide(color: Color(0xFF383838))),
+                     ),
+                     child: Consumer(builder: (context, ref, _) {
+                        final canUndo = ref.watch(projectProvider.select((s) => s.canUndo));
+                        final canRedo = ref.watch(projectProvider.select((s) => s.canRedo));
+                        return _buildToolbar(context, ref, canUndo, canRedo);
+                     }),
+                   ),
+                   
+                   Expanded(
+                     child: Row(
+                       children: [
+                         // Left Dock
+                         _buildLeftDock(ref),
+                         
+                         // Center Canvas
+                         Expanded(
+                           child: Container(
+                             color: const Color(0xFF000000),
+                             child: Center(
+                               child: _buildCanvas(context, ref, state),
+                             ),
+                           ),
+                         ),
+                         
+                         // Right Dock
+                         _buildDock("Properties & Photos", 300, _buildRightDock(context, ref, state)),
+                       ],
+                     ),
+                   ),
+                   
+                   // Bottom Dock (Thumbnails)
+                   Container(
+                     height: 140,
+                     decoration: BoxDecoration(
+                       color: Colors.grey[200],
+                       border: Border(top: BorderSide(color: Colors.grey[400]!)),
+                     ),
+                     child: _buildThumbnails(ref, state),
+                   ),
+                 ],
+               ),
+               
+               if (isProcessing)
+                 Positioned.fill(
+                   child: Container(
+                     color: Colors.black54,
+                     child: Center(
+                       child: Column(
+                         mainAxisSize: MainAxisSize.min,
+                         children: [
+                           const CircularProgressIndicator(color: Colors.amberAccent),
+                           const SizedBox(height: 16),
+                           Text(
+                             "IA Smart Flow: Analisando fotos...",
+                             style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                           ),
+                           const SizedBox(height: 8),
+                           Text(
+                             "Garantindo a melhor orientação e estilo",
+                             style: GoogleFonts.inter(color: Colors.white70, fontSize: 12),
+                           ),
+                         ],
+                       ),
+                     ),
+                   ),
+                 ),
+             ],
           ),
-          if (isProcessing)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black54,
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(color: Colors.amberAccent),
-                      const SizedBox(height: 16),
-                      Text(
-                        "IA Smart Flow: Analisando fotos...",
-                        style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        "Garantindo a melhor orientação e estilo",
-                        style: GoogleFonts.inter(color: Colors.white70, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-        ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 
   Widget _buildToolbar(BuildContext context, WidgetRef ref, bool canUndo, bool canRedo) {
     return Container(
@@ -230,6 +355,14 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
              }
           ),
           IconButton(
+             icon: const Icon(Icons.vertical_split, color: Colors.indigoAccent), 
+             tooltip: "Curingar Verticais (Agrupar Pares)",
+             onPressed: () {
+                ref.read(projectProvider.notifier).groupConsecutiveVerticals();
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Fotos verticais agrupadas!")));
+             }
+          ),
+          IconButton(
              icon: const Icon(Icons.psychology_outlined, color: Colors.amberAccent), 
              tooltip: "AI Smart Flow (Layout Selection)",
              onPressed: () {
@@ -238,8 +371,68 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Select some images first!")));
                    return;
                 }
+                print("DEBUG: Smart Flow Button Pressed. Selected: ${state.selectedBrowserPaths.length}");
                 ref.read(projectProvider.notifier).applyAutoLayout(state.selectedBrowserPaths.toList());
              }
+          ),
+          const VerticalDivider(indent: 8, endIndent: 8, color: Colors.white24),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.construction, color: Colors.white70),
+            tooltip: "Ferramentas",
+            onSelected: (value) {
+               if (value == 'batch_export') {
+                  _showBatchExportDialog(context);
+               } else if (value == 'generate_labels_endpoints') {
+                  ref.read(projectProvider.notifier).generateLabels(allPages: false);
+               } else if (value == 'generate_labels_all') {
+                  ref.read(projectProvider.notifier).generateLabels(allPages: true);
+               } else if (value == 'generate_labels_kit') {
+                  ref.read(projectProvider.notifier).generateKitLabels();
+               }
+            },
+            itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+               const PopupMenuItem<String>(
+                value: 'batch_export',
+                child: Row(
+                   children: [
+                      Icon(Icons.drive_folder_upload, color: Colors.black54),
+                      SizedBox(width: 8),
+                      Text('Exportação em Lote (Auto)'),
+                   ],
+                ),
+               ),
+               const PopupMenuDivider(),
+               const PopupMenuItem<String>(
+                 value: 'generate_labels_endpoints',
+                 child: Row(
+                   children: [
+                     Icon(Icons.label_outline, color: Colors.blueGrey),
+                     SizedBox(width: 8),
+                     Text('Gerar Etiquetas (Primeira/Última)'),
+                   ],
+                 ),
+               ),
+               const PopupMenuItem<String>(
+                 value: 'generate_labels_all',
+                 child: Row(
+                   children: [
+                     Icon(Icons.label, color: Colors.amber),
+                     SizedBox(width: 8),
+                     Text('Gerar Etiquetas (Todas)'),
+                   ],
+                 ),
+               ),
+               const PopupMenuItem<String>(
+                 value: 'generate_labels_kit',
+                 child: Row(
+                   children: [
+                     Icon(Icons.assignment_ind, color: Colors.green),
+                     SizedBox(width: 8),
+                     Text('Gerar Etiquetas de Kit'),
+                   ],
+                 ),
+               ),
+            ],
           ),
           const Spacer(),
           IconButton(
@@ -255,121 +448,6 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     );
   }
 
-  void _showNewProjectDialog(BuildContext context, WidgetRef ref) {
-    final widthCtrl = TextEditingController(text: "21.0");
-    final heightCtrl = TextEditingController(text: "29.7");
-    final dpiCtrl = TextEditingController(text: "300");
-    final contractCtrl = TextEditingController();
-    final fichaCtrl = TextEditingController();
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF333333),
-        title: const Text("New Project Setup", style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text("Define Page Size", style: TextStyle(color: Colors.white70)),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: widthCtrl,
-                    style: const TextStyle(color: Colors.white),
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Width (cm)",
-                      labelStyle: TextStyle(color: Colors.white54),
-                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: heightCtrl,
-                    style: const TextStyle(color: Colors.white),
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Height (cm)",
-                      labelStyle: TextStyle(color: Colors.white54),
-                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: dpiCtrl,
-              style: const TextStyle(color: Colors.white),
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
-                labelText: "DPI (Resolution)",
-                labelStyle: TextStyle(color: Colors.white54),
-                enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: contractCtrl,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: "Contrato (opcional)",
-                labelStyle: TextStyle(color: Colors.white54),
-                enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: fichaCtrl,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: "Ficha/Projeto (opcional)",
-                labelStyle: TextStyle(color: Colors.white54),
-                enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            child: const Text("Cancel"),
-            onPressed: () => Navigator.pop(ctx),
-          ),
-          ElevatedButton(
-            child: const Text("Create Project"),
-            onPressed: () {
-               final w = double.tryParse(widthCtrl.text) ?? 21.0;
-               final h = double.tryParse(heightCtrl.text) ?? 29.7;
-               final dpi = int.tryParse(dpiCtrl.text) ?? 300;
-               
-               // Convert CM to MM
-               final widthMm = w * 10;
-               final heightMm = h * 10;
-
-               // Initialize
-               ref.read(projectProvider.notifier).initializeProject(widthMm, heightMm, 1);
-               
-               // Set contract and ficha if provided
-               if (contractCtrl.text.isNotEmpty) {
-                 ref.read(projectProvider.notifier).setContractNumber(contractCtrl.text);
-               }
-               if (fichaCtrl.text.isNotEmpty) {
-                 ref.read(projectProvider.notifier).state = ref.read(projectProvider).copyWith(
-                   project: ref.read(projectProvider).project.copyWith(name: fichaCtrl.text),
-                 );
-               }
-               
-               Navigator.pop(ctx);
-            },
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _buildLeftDock(WidgetRef ref) {
     return Container(
@@ -433,41 +511,56 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     );
   }
 
+
+// ... existing code ...
+
   Widget _buildAssetLibrary(WidgetRef ref) {
     final assetState = ref.watch(assetProvider);
     if (assetState.isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(8.0),
-          child: ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF1A1A1A),
-              foregroundColor: Colors.white,
-              minimumSize: const Size(double.infinity, 36),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(4),
-                side: const BorderSide(color: Color(0xFF262626)),
+    // Keyboard Listener for Gallery Shortcuts
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyA, control: true): () => 
+            ref.read(assetProvider.notifier).selectAll(),
+        const SingleActivator(LogicalKeyboardKey.keyD, control: true): () => 
+            ref.read(assetProvider.notifier).deselectAll(),
+      },
+      child: Focus(
+        autofocus: true, 
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1A1A1A),
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(double.infinity, 36),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(4),
+                    side: const BorderSide(color: Color(0xFF262626)),
+                  ),
+                ),
+                onPressed: () => _showAddCollectionDialog(context, ref),
+                icon: const Icon(Icons.create_new_folder_outlined, size: 16),
+                label: const Text("Nova Coleção", style: TextStyle(fontSize: 12)),
               ),
             ),
-            onPressed: () => _showAddCollectionDialog(context, ref),
-            icon: const Icon(Icons.create_new_folder_outlined, size: 16),
-            label: const Text("Nova Coleção", style: TextStyle(fontSize: 12)),
-          ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: assetState.collections.length,
+                itemBuilder: (ctx, idx) {
+                  final collection = assetState.collections[idx];
+                  return _buildAssetCollection(context, ref, collection);
+                },
+              ),
+            ),
+          ],
         ),
-        Expanded(
-          child: ListView.builder(
-            itemCount: assetState.collections.length,
-            itemBuilder: (ctx, idx) {
-              final collection = assetState.collections[idx];
-              return _buildAssetCollection(context, ref, collection);
-            },
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -511,6 +604,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   }
 
   Widget _buildLibraryAssetItem(WidgetRef ref, String collectionId, LibraryAsset asset) {
+    final assetState = ref.watch(assetProvider);
+    final isSelected = assetState.selectedAssetIds.contains(asset.id);
+
     return Draggable<LibraryAsset>(
       data: asset,
       feedback: Opacity(
@@ -520,39 +616,71 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           child: Image.file(File(asset.path), fit: BoxFit.contain),
         ),
       ),
-      child: Stack(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFF1A1A1A),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(
-                color: asset.type == AssetType.template ? Colors.amberAccent.withOpacity(0.3) : Colors.transparent,
-                width: 1,
+      child: GestureDetector(
+        onTap: () {
+          final isShiftPressed = HardwareKeyboard.instance.logicalKeysPressed
+              .contains(LogicalKeyboardKey.shiftLeft) ||
+              HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+          
+          if (isShiftPressed && assetState.selectedAssetIds.isNotEmpty) {
+             // Range logic: simplistic for now, ideally needs ordered list info
+             // Using last selected roughly if available, or just keeping shift behavior simple
+             ref.read(assetProvider.notifier).toggleSelection(asset.id);
+          } else {
+             ref.read(assetProvider.notifier).toggleSelection(asset.id);
+          }
+        },
+        onDoubleTap: () {
+          // Flatten all assets to pass to viewer
+          final allAssets = assetState.collections.expand((c) => c.assets).toList();
+          final index = allAssets.indexWhere((a) => a.id == asset.id);
+          if (index != -1) {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => FullScreenViewer(assets: allAssets, initialIndex: index)),
+            );
+          }
+        },
+        child: Stack(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.deepPurple.withOpacity(0.3) : const Color(0xFF1A1A1A),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: isSelected 
+                      ? Colors.deepPurpleAccent 
+                      : (asset.type == AssetType.template ? Colors.amberAccent.withOpacity(0.3) : Colors.transparent),
+                  width: isSelected ? 2 : 1,
+                ),
+              ),
+              padding: const EdgeInsets.all(4),
+              child: Column(
+                children: [
+                  Expanded(child: Image.file(File(asset.path), fit: BoxFit.contain)),
+                  const SizedBox(height: 2),
+                  Text(
+                    asset.type == AssetType.template ? "Template" : "Elemento",
+                    style: const TextStyle(fontSize: 7, color: Colors.white38),
+                  ),
+                ],
               ),
             ),
-            padding: const EdgeInsets.all(4),
-            child: Column(
-              children: [
-                Expanded(child: Image.file(File(asset.path), fit: BoxFit.contain)),
-                const SizedBox(height: 2),
-                Text(
-                  asset.type == AssetType.template ? "Template" : "Elemento",
-                  style: const TextStyle(fontSize: 7, color: Colors.white38),
-                ),
-              ],
+            if (isSelected)
+              const Positioned(
+                bottom: 4, right: 4,
+                child: Icon(Icons.check_circle, size: 14, color: Colors.deepPurpleAccent),
+              ),
+            Positioned(
+              top: 0, right: 0,
+              child: IconButton(
+                icon: const Icon(Icons.close, size: 12, color: Colors.white54),
+                onPressed: () => ref.read(assetProvider.notifier).removeAssetFromCollection(collectionId, asset.id),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
             ),
-          ),
-          Positioned(
-            top: 0, right: 0,
-            child: IconButton(
-              icon: const Icon(Icons.close, size: 12, color: Colors.white54),
-              onPressed: () => ref.read(assetProvider.notifier).removeAssetFromCollection(collectionId, asset.id),
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -656,37 +784,208 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   }
 
   Widget _buildFileBrowser(WidgetRef ref) {
-    return ListView(
-      padding: const EdgeInsets.all(8),
+    final projectState = ref.watch(projectProvider);
+    final notifier = ref.read(projectProvider.notifier);
+    
+    // Get Sorted/Filtered List computed by Notifier logic
+    final displayedPaths = notifier.getSortedAndFilteredPaths();
+
+    return Column(
       children: [
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF1A1A1A), // Subtle gray/black
-            foregroundColor: Colors.white,
-            elevation: 0,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4), side: BorderSide(color: Color(0xFF262626))),
+        _buildBrowserToolbar(ref, projectState),
+        Expanded(
+          child: CallbackShortcuts(
+            bindings: {
+              const SingleActivator(LogicalKeyboardKey.keyA, control: true): () => 
+                  notifier.selectAllBrowserPhotos(),
+              const SingleActivator(LogicalKeyboardKey.keyD, control: true): () => 
+                  notifier.deselectAllBrowserPhotos(),
+            },
+            child: Focus(
+              autofocus: true,
+              child: GridView.builder(
+                padding: const EdgeInsets.all(8),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 4,
+                  mainAxisSpacing: 4,
+                ),
+                itemCount: displayedPaths.length,
+                itemBuilder: (ctx, i) {
+                  final path = displayedPaths[i];
+                  final isSelected = projectState.selectedBrowserPaths.contains(path);
+                  final rot = projectState.project.imageRotations[path] ?? 0;
+                  final version = ref.watch(imageVersionProvider(path)); // Watch version
+
+                  return Draggable<String>(
+                    data: path,
+                    feedback: Opacity(
+                      opacity: 0.7,
+                      child: SizedBox(
+                        width: 60, height: 60,
+                        child: RotatedBox(quarterTurns: rot ~/ 90, child: Image.file(File(path), key: ValueKey('${path}_$version'), fit: BoxFit.contain)),
+                      ),
+                    ),
+                    child: GestureDetector(
+                      onTap: () {
+                           final isShiftPressed = HardwareKeyboard.instance.logicalKeysPressed
+                               .contains(LogicalKeyboardKey.shiftLeft) ||
+                               HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+                           
+                           if (isShiftPressed && _lastSelectedBrowserPath != null) {
+                               notifier.selectBrowserRange(_lastSelectedBrowserPath!, path, displayedPaths);
+                           } else {
+                               notifier.toggleBrowserPathSelection(path);
+                               _lastSelectedBrowserPath = path;
+                           }
+                      },
+                      onDoubleTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => BrowserFullScreenViewer(paths: displayedPaths, initialIndex: i)),
+                        );
+                      },
+                      child: Stack(
+                        children: [
+                          Container(
+                            decoration: BoxDecoration(
+                              color: isSelected ? Colors.deepPurple.withOpacity(0.3) : const Color(0xFF1A1A1A),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(
+                                color: isSelected ? Colors.deepPurpleAccent : Colors.transparent,
+                                width: isSelected ? 2 : 1,
+                              ),
+                            ),
+                            padding: const EdgeInsets.all(4),
+                            child: Center(
+                              child: RotatedBox(
+                                quarterTurns: rot ~/ 90,
+                                child: Image.file(File(path), key: ValueKey('${path}_$version'), fit: BoxFit.contain),
+                              ),
+                            ),
+                          ),
+                          if (isSelected)
+                            const Positioned(
+                              bottom: 4, right: 4,
+                              child: Icon(Icons.check_circle, size: 14, color: Colors.deepPurpleAccent),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
           ),
-          onPressed: () async {
-            final result = await FilePicker.platform.pickFiles(
-              type: FileType.custom,
-              allowedExtensions: [
-                'jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif',
-                'JPG', 'JPEG', 'PNG', 'WEBP', 'BMP', 'TIFF', 'TIF'
-              ],
-              allowMultiple: true,
-            );
-            if (result != null) {
-              final paths = result.paths.whereType<String>().toList();
-              ref.read(projectProvider.notifier).addPhotos(paths);
-            }
-          },
-          icon: const Icon(Icons.add, size: 18),
-          label: const Text("Import Images", style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
         ),
-        const SizedBox(height: 10),
-        const Text("Drag & Drop supported", style: TextStyle(color: Colors.grey)),
       ],
     );
+  }
+
+  Widget _buildBrowserToolbar(WidgetRef ref, PhotoBookState state) {
+      final notifier = ref.read(projectProvider.notifier);
+      return Container(
+        height: 100, // Increased height for two rows
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        color: const Color(0xFF1A1A1A),
+        child: Column(
+          children: [
+             // Import and Sort Row
+             // Import and Sort Row
+             SingleChildScrollView(
+               scrollDirection: Axis.horizontal,
+               child: Row(
+                 mainAxisSize: MainAxisSize.min,
+                 children: [
+                   // Import Button (Small)
+                   ElevatedButton(
+                       style: ElevatedButton.styleFrom(
+                         backgroundColor: const Color(0xFF333333),
+                         foregroundColor: Colors.white,
+                         minimumSize: const Size(80, 28),
+                         padding: const EdgeInsets.symmetric(horizontal: 8),
+                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                       ),
+                       onPressed: () async {
+                         final result = await FilePicker.platform.pickFiles(
+                           type: FileType.custom,
+                           allowedExtensions: [
+                             'jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif',
+                             'JPG', 'JPEG', 'PNG', 'WEBP', 'BMP', 'TIFF', 'TIF'
+                           ],
+                           allowMultiple: true,
+                         );
+                         if (result != null) {
+                           notifier.addPhotos(result.paths.whereType<String>().toList());
+                         }
+                       },
+                       child: const Text("Importar", style: TextStyle(fontSize: 11)),
+                   ),
+                   const SizedBox(width: 8),
+                   // Sort Options
+                   const Text("Sort:", style: TextStyle(color: Colors.white54, fontSize: 10)),
+                   _buildToolIcon(Icons.sort_by_alpha, "Nome", 
+                      state.browserSortType == BrowserSortType.name,
+                      () => notifier.setBrowserSortType(BrowserSortType.name)),
+                   _buildToolIcon(Icons.access_time, "Data", 
+                      state.browserSortType == BrowserSortType.date,
+                      () => notifier.setBrowserSortType(BrowserSortType.date)),
+                   _buildToolIcon(Icons.check_circle, "Sel.", 
+                      state.browserSortType == BrowserSortType.selected,
+                      () => notifier.setBrowserSortType(BrowserSortType.selected)),
+                   
+                   const SizedBox(width: 16),
+                   TextButton(
+                      onPressed: () => _handleAutoSelect(context, notifier),
+                      child: const Text("AutoSelec", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
+                   ),
+                 ],
+               ),
+             ),
+             
+             const Divider(height: 8, color: Colors.white12),
+             
+             // Filter Row
+             Expanded(
+               child: SingleChildScrollView(
+                 scrollDirection: Axis.horizontal,
+                 child: Row(
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    children: [
+                       const Text("Filtros: ", style: TextStyle(color: Colors.white54, fontSize: 10)),
+                       _buildToolIcon(Icons.grid_view, "Todos", 
+                          state.browserFilterType == BrowserFilterType.all,
+                          () => notifier.setBrowserFilterType(BrowserFilterType.all)),
+                       _buildToolIcon(Icons.check_box, "Marcados", 
+                          state.browserFilterType == BrowserFilterType.selected,
+                          () => notifier.setBrowserFilterType(BrowserFilterType.selected)),
+                       _buildToolIcon(Icons.check_box_outline_blank, "Desmarcados", 
+                          state.browserFilterType == BrowserFilterType.unselected,
+                          () => notifier.setBrowserFilterType(BrowserFilterType.unselected)),
+                       const VerticalDivider(width: 8, color: Colors.white12, indent: 4, endIndent: 4),
+                       _buildToolIcon(Icons.photo_album, "Usados", 
+                          state.browserFilterType == BrowserFilterType.used,
+                          () => notifier.setBrowserFilterType(BrowserFilterType.used)),
+                       _buildToolIcon(Icons.visibility_off, "Não Usados", 
+                          state.browserFilterType == BrowserFilterType.unused,
+                          () => notifier.setBrowserFilterType(BrowserFilterType.unused)),
+                    ],
+                 ),
+               ),
+             ),
+          ],
+        ),
+      );
+   }
+  
+  Widget _buildToolIcon(IconData icon, String tooltip, bool active, VoidCallback onTap) {
+      return IconButton(
+        icon: Icon(icon, size: 16, color: active ? Colors.blueAccent : Colors.white54),
+        tooltip: tooltip,
+        onPressed: onTap,
+        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        splashRadius: 20,
+      );
   }
 
   Widget _buildRightDock(BuildContext context, WidgetRef ref, PhotoBookState state) {
@@ -855,6 +1154,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     if (state.project.pages.isEmpty) return const SizedBox();
 
     final currentPage = state.project.pages[state.project.currentPageIndex];
+    if (state.isExporting) {
+       print("DEBUG: _buildCanvas - Page Size: ${currentPage.widthMm} x ${currentPage.heightMm} | isExporting: true");
+    }
 
     return Container(
       color: const Color(0xFF000000),
@@ -866,6 +1168,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
               onTap: () {
                  ref.read(projectProvider.notifier).selectPhoto(null);
                  ref.read(projectProvider.notifier).setEditingContent(false);
+                 _canvasFocusNode.requestFocus();
               },
               behavior: HitTestBehavior.opaque, // Catch everything not caught by children
               child: Container(color: Colors.transparent),
@@ -873,16 +1176,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ),
           
           Positioned.fill(
-            child: InteractiveViewer(
-              transformationController: _transformationController,
-              minScale: 0.1,
-              maxScale: 10.0,
-              scaleEnabled: true,
-              panEnabled: true,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(200),
+            child: Focus(
+                focusNode: _canvasFocusNode,
+                autofocus: true,
+                child: InteractiveViewer(
+                  transformationController: _transformationController,
+                  minScale: 0.01,
+                  maxScale: 10.0,
+                  scaleEnabled: true,
+                  panEnabled: true,
+                  // Reduced boundary margin to strictly 10% as requested
+                  boundaryMargin: EdgeInsets.all(currentPage.widthMm * 0.1), 
                   child: DropTarget(
                     onDragDone: (details) {
                        _handleDrop(ref, details.localPosition, details.files.map((f) => f.path).toList(), currentPage);
@@ -905,15 +1209,23 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                           onSecondaryTapDown: (details) {
                             _showPageContextMenu(context, ref, details.localPosition);
                           },
-                          child: RepaintBoundary(
-                            key: _canvasCaptureKey,
-                            child: Container(
-                              key: _pageKey,
-                              width: currentPage.widthMm,
-                              height: currentPage.heightMm,
-                              decoration: BoxDecoration(
+                          // Reverting to Center/Padding structure for visual "correctness"
+                          // Changed Center to Align(topLeft) to match user preference for origin.
+                          child: Align(
+                            alignment: Alignment.topLeft,
+                            child: Padding(
+                              padding: const EdgeInsets.all(20), // Visual margin reduced to 20
+                              child: RepaintBoundary(
+                                key: _canvasCaptureKey,
+                                child: Container(
+                                  key: _pageKey,
+                                  width: currentPage.widthMm,
+                                  height: currentPage.heightMm,
+                                  decoration: BoxDecoration(
                                 color: Color(currentPage.backgroundColor),
-                                boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 20)],
+                                boxShadow: state.isExporting 
+                                   ? null 
+                                   : const [BoxShadow(color: Colors.black45, blurRadius: 20)],
                               ),
                               child: Stack(
                                 clipBehavior: Clip.none,
@@ -921,16 +1233,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                                   ...currentPage.photos.map((photo) => _buildPhotoWidget(ref, photo, state.selectedPhotoId == photo.id, key: ValueKey(photo.id))),
                                 ],
                               ),
-                            ),
-                          ),
-                        );
-                      },
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
                     ),
                   ),
                 ),
               ),
             ),
-          ),
           
           // 2. Zoom Controls Overlay
           Positioned(
@@ -952,7 +1265,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       final current = _transformationController.value;
                       final zoom = current.getMaxScaleOnAxis();
                       final newScale = (zoom - 0.1).clamp(0.1, 5.0);
-                      _transformationController.value = Matrix4.identity()..scale(newScale);
+                      _updateCanvasView(context, ref, state, overrideScale: newScale);
                     },
                     tooltip: "Zoom Out",
                   ),
@@ -966,7 +1279,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       final current = _transformationController.value;
                       final zoom = current.getMaxScaleOnAxis();
                       final newScale = (zoom + 0.1).clamp(0.1, 5.0);
-                      _transformationController.value = Matrix4.identity()..scale(newScale);
+                      _updateCanvasView(context, ref, state, overrideScale: newScale);
                     },
                     tooltip: "Zoom In",
                   ),
@@ -974,7 +1287,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                   IconButton(
                     icon: const Icon(Icons.center_focus_strong, color: Colors.white70),
                     onPressed: () {
-                       _fitToScreen(context, ref, state);
+                       _updateCanvasView(context, ref, state);
                     },
                     tooltip: "Fit to Screen",
                   ),
@@ -1044,6 +1357,33 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       color: const Color(0xFF262626),
       items: <PopupMenuEntry<dynamic>>[
         PopupMenuItem(
+          child: const ListTile(leading: Icon(Icons.edit, color: Colors.blueAccent, size: 18), title: Text("Abrir no Editor", style: TextStyle(color: Colors.white))),
+          onTap: () {
+            // Navigate to BrowserFullScreenViewer with ALL photos (context aware)
+             final paths = ref.read(projectProvider).project.pages
+                 .expand((p) => p.photos)
+                 .where((p) => !p.isText && p.path.isNotEmpty)
+                 .map((p) => p.path)
+                 .toSet() // Unique paths
+                 .toList();
+             
+             final initialIndex = paths.indexOf(photo.path);
+             
+             if (initialIndex != -1) {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => BrowserFullScreenViewer(
+                      paths: paths,
+                      initialIndex: initialIndex,
+                    ),
+                  ),
+                );
+             }
+          },
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
           child: const ListTile(leading: Icon(Icons.content_cut, color: Colors.white, size: 18), title: Text("Cortar", style: TextStyle(color: Colors.white))),
           onTap: () => ref.read(projectProvider.notifier).cutPhoto(photo.id),
         ),
@@ -1074,6 +1414,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     final RenderBox? overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
     if (overlay == null) return;
 
+    // Prevent empty menu crash
+    if (state.clipboardPhoto == null) return;
+
     showMenu(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -1089,158 +1432,163 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
             child: const ListTile(leading: Icon(Icons.content_paste, color: Colors.white, size: 18), title: Text("Colar Aqui", style: TextStyle(color: Colors.white))),
             onTap: () => ref.read(projectProvider.notifier).pastePhoto(localPos.dx, localPos.dy),
           ),
-        const PopupMenuDivider(),
-        PopupMenuItem(
-          child: const ListTile(leading: Icon(Icons.label, color: Colors.white, size: 18), title: Text("Gerar Etiquetas (Primeira/Última)", style: TextStyle(color: Colors.white, fontSize: 13))),
-          onTap: () {
-            _showContractDialog(context, ref, allPages: false);
-          },
-        ),
-        PopupMenuItem(
-          child: const ListTile(leading: Icon(Icons.label, color: Colors.amber, size: 18), title: Text("Gerar Etiquetas (Todas)", style: TextStyle(color: Colors.white, fontSize: 13))),
-          onTap: () {
-            _showContractDialog(context, ref, allPages: true);
-          },
-        ),
       ],
     );
   }
 
-  void _showContractDialog(BuildContext context, WidgetRef ref, {required bool allPages}) {
-    final labelCtrl = TextEditingController();
-    
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF333333),
-        title: const Text("Texto da Etiqueta", style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: labelCtrl,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(
-            labelText: "Texto da Etiqueta",
-            hintText: "Ex: 340_2234",
-            labelStyle: TextStyle(color: Colors.white54),
-            hintStyle: TextStyle(color: Colors.white38),
-            enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
-            focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.blue)),
-          ),
-        ),
-        actions: [
-          TextButton(
-            child: const Text("Cancelar"),
-            onPressed: () => Navigator.pop(ctx),
-          ),
-          ElevatedButton(
-            child: const Text("Gerar Etiquetas"),
-            onPressed: () {
-              if (labelCtrl.text.isNotEmpty) {
-                // Store the label text temporarily for generation
-                ref.read(projectProvider.notifier).state = ref.read(projectProvider).copyWith(
-                  project: ref.read(projectProvider).project.copyWith(
-                    contractNumber: labelCtrl.text,
-                  ),
-                );
-              }
-              ref.read(projectProvider.notifier).generateLabels(allPages: allPages);
-              Navigator.pop(ctx);
-            },
-          ),
-        ],
-      ),
-    );
-  }
+
 
   Widget _buildThumbnails(WidgetRef ref, PhotoBookState state) {
-    return Container(
-      color: const Color(0xFF1E1E1E),
-      child: Scrollbar(
-        controller: _thumbScrollController,
-        thumbVisibility: true,
-      child: ReorderableListView.builder(
-          scrollController: _thumbScrollController,
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-          itemCount: state.project.pages.length,
-          buildDefaultDragHandles: false, // We will provide our own drag listener
-          onReorder: (oldIndex, newIndex) {
-            ref.read(projectProvider.notifier).reorderPage(oldIndex, newIndex);
-          },
-          itemBuilder: (context, index) {
-            final page = state.project.pages[index];
-            final isCurrent = state.project.currentPageIndex == index;
-            final double pageAspectRatio = page.widthMm / page.heightMm;
-            final double thumbHeight = 110.0;
-            final double thumbWidth = thumbHeight * pageAspectRatio;
+  return Container(
+    color: const Color(0xFF1E1E1E),
+    child: Scrollbar(
+      controller: _thumbScrollController,
+      thumbVisibility: true,
+    child: ReorderableListView.builder(
+        scrollController: _thumbScrollController,
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        itemCount: state.project.pages.length,
+        buildDefaultDragHandles: false, // We use ReorderableDragStartListener
+        onReorder: (oldIndex, newIndex) {
+          ref.read(projectProvider.notifier).reorderPage(oldIndex, newIndex);
+        },
+        itemBuilder: (context, index) {
+          final page = state.project.pages[index];
+          final isCurrent = state.project.currentPageIndex == index;
+          final isMultiSelected = state.multiSelectedPages.contains(index);
+          final isSelected = isCurrent || isMultiSelected;
+          
+          final double pageAspectRatio = page.widthMm / page.heightMm;
+          final double thumbHeight = 110.0;
+          final double thumbWidth = thumbHeight * pageAspectRatio;
 
-            return ReorderableDragStartListener(
-              index: index,
-              key: ValueKey(page.id),
-              child: GestureDetector(
-                onTap: () => ref.read(projectProvider.notifier).setPageIndex(index),
-                child: Container(
-                  width: thumbWidth,
-                  margin: const EdgeInsets.symmetric(horizontal: 6),
-                decoration: BoxDecoration(
-                  color: Color(page.backgroundColor),
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: isCurrent ? Colors.amberAccent : Colors.white12,
-                    width: isCurrent ? 2 : 1,
+          return ReorderableDragStartListener(
+            index: index,
+            key: ValueKey(page.id),
+            child: GestureDetector(
+              onTap: () {
+                 final Set<LogicalKeyboardKey> pressed = HardwareKeyboard.instance.logicalKeysPressed;
+                 final isShift = pressed.contains(LogicalKeyboardKey.shiftLeft) || pressed.contains(LogicalKeyboardKey.shiftRight);
+                 final isCtrl = pressed.contains(LogicalKeyboardKey.controlLeft) || pressed.contains(LogicalKeyboardKey.controlRight);
+                 
+                 if (isShift) {
+                     ref.read(projectProvider.notifier).selectPageRange(state.project.currentPageIndex, index);
+                 } else if (isCtrl) {
+                     ref.read(projectProvider.notifier).togglePageSelection(index);
+                     // Also set as current if it's the only one?
+                     ref.read(projectProvider.notifier).setPageIndex(index);
+                 } else {
+                     // Standard click clears selection and sets current
+                     ref.read(projectProvider.notifier).clearPageSelection();
+                     ref.read(projectProvider.notifier).setPageIndex(index);
+                 }
+              },
+              onSecondaryTapUp: (details) {
+                   // Right click context menu
+                   if (!isSelected) {
+                       ref.read(projectProvider.notifier).setPageIndex(index);
+                       ref.read(projectProvider.notifier).clearPageSelection();
+                   }
+                   
+                   final multiCount = state.multiSelectedPages.length;
+                   final deleteLabel = multiCount > 1 ? "Excluir $multiCount Páginas" : "Excluir Página";
+                   
+                   showMenu(
+                     context: context,
+                     position: RelativeRect.fromLTRB(
+                       details.globalPosition.dx, 
+                       details.globalPosition.dy, 
+                       details.globalPosition.dx + 1, 
+                       details.globalPosition.dy + 1
+                     ),
+                     color: const Color(0xFF262626),
+                     items: [
+                       if (multiCount > 1) 
+                         PopupMenuItem(
+                           child: const ListTile(
+                             leading: Icon(Icons.merge_type, color: Colors.blueAccent, size: 18), 
+                             title: Text("Fundir Páginas", style: TextStyle(color: Colors.white))
+                           ),
+                           onTap: () {
+                             ref.read(projectProvider.notifier).mergeSelectedPages();
+                           },
+                         ),
+                       PopupMenuItem(
+                         child: ListTile(leading: const Icon(Icons.delete, color: Colors.red, size: 18), title: Text(deleteLabel, style: const TextStyle(color: Colors.white))),
+                         onTap: () {
+                            if (multiCount > 1) {
+                                ref.read(projectProvider.notifier).removeSelectedPages();
+                            } else {
+                                ref.read(projectProvider.notifier).removePage(index);
+                            }
+                         },
+                       ),
+                     ]
+                   );
+              },
+              child: Container(
+                width: thumbWidth,
+                margin: const EdgeInsets.symmetric(horizontal: 6),
+              decoration: BoxDecoration(
+                color: Color(page.backgroundColor),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: isCurrent ? Colors.amberAccent : (isMultiSelected ? Colors.blueAccent : Colors.white12),
+                  width: isSelected ? 2 : 1,
+                ),
+                boxShadow: [
+                  if (isSelected)
+                    BoxShadow(color: (isCurrent ? Colors.amberAccent : Colors.blueAccent).withOpacity(0.4), blurRadius: 8),
+                ],
+              ),
+              child: Stack(
+                children: [
+                  // Page Content Preview (Actual Photos)
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.all(4.0),
+                      child: _buildMiniPagePreview(page),
+                    ),
                   ),
-                  boxShadow: [
-                    if (isCurrent)
-                      BoxShadow(color: Colors.amberAccent.withOpacity(0.4), blurRadius: 8),
-                  ],
-                ),
-                child: Stack(
-                  children: [
-                    // Page Content Preview (Actual Photos)
-                    Positioned.fill(
-                      child: Padding(
-                        padding: const EdgeInsets.all(4.0),
-                        child: _buildMiniPagePreview(page),
+                  
+                  // Page Number Badge
+                  Positioned(
+                    top: 4, left: 4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: isCurrent ? Colors.amberAccent : (isMultiSelected ? Colors.blueAccent : Colors.black54),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        "${index + 1}", 
+                        style: TextStyle(
+                          color: isCurrent ? Colors.black : Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
-                    
-                    // Page Number Badge
+                  ),
+                  
+                  if (page.photos.isNotEmpty)
                     Positioned(
-                      top: 4, left: 4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: isCurrent ? Colors.amberAccent : Colors.black54,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          "${index + 1}", 
-                          style: TextStyle(
-                            color: isCurrent ? Colors.black : Colors.white70,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                      bottom: 4, right: 4,
+                      child: Text(
+                        "${page.photos.length} fotos",
+                        style: TextStyle(fontSize: 8, color: Colors.grey[500]),
                       ),
                     ),
-                    
-                    if (page.photos.isNotEmpty)
-                      Positioned(
-                        bottom: 4, right: 4,
-                        child: Text(
-                          "${page.photos.length} fotos",
-                          style: TextStyle(fontSize: 8, color: Colors.grey[500]),
-                        ),
-                      ),
-                  ],
-                ),
+                ],
               ),
             ),
-          );
-        },
-      ),
-      ),
-    );
+          ),
+        );
+      },
+    ),
+    ),
+  );
   }
 
   Widget _buildMiniPagePreview(AlbumPage page) {
@@ -1273,7 +1621,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     );
   }
 
-  void _fitToScreen(BuildContext context, WidgetRef ref, PhotoBookState state) {
+  void _updateCanvasView(BuildContext context, WidgetRef ref, PhotoBookState state, {double? overrideScale}) {
     if (state.project.pages.isEmpty) return;
     
     final RenderBox? box = context.findRenderObject() as RenderBox?;
@@ -1282,26 +1630,68 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     final Size viewportSize = box.size;
     final page = state.project.pages[state.project.currentPageIndex];
     
-    // Available space for the page (viewport minus some padding)
-    final double availWidth = viewportSize.width - 200; // Account for 100 padding on each side
-    final double availHeight = viewportSize.height - 250; // Account for padding + bottom dock
+    // Estimate Canvas Dimensions (Window - Dock/Bars)
+    // Relaxed margins slightly based on user feedback "extremely large"
+    final double availWidth = viewportSize.width - 400; 
+    final double availHeight = viewportSize.height - 220; 
     
     if (availWidth <= 0 || availHeight <= 0) return;
 
-    final double scaleX = availWidth / page.widthMm;
-    final double scaleY = availHeight / page.heightMm;
+    // 1. Determine Scale
+    double finalScale;
+    if (overrideScale != null) {
+      finalScale = overrideScale.clamp(0.1, 5.0);
+    } else {
+      // Calculate scale to fit page + padding (20+20=40)
+      final double contentWidth = page.widthMm + 40;
+      final double contentHeight = page.heightMm + 40;
+      
+      final double scaleX = availWidth / contentWidth;
+      final double scaleY = availHeight / contentHeight;
+      
+      finalScale = (scaleX < scaleY ? scaleX : scaleY).clamp(0.1, 5.0);
+    }
     
-    final double finalScale = (scaleX < scaleY ? scaleX : scaleY).clamp(0.1, 5.0);
+    // 2. Align Top-Left (0,0)
+    // User requested Top 0, Left 0.
+    // The internal padding (50->20) will provide the visual margin.
+    final double dx = 0.0;
+    final double dy = 0.0;
     
-    _transformationController.value = Matrix4.identity()..scale(finalScale);
+    // 3. Apply Matrix (Translate then Scale)
+    // Note: InteractiveViewer applies the matrix to the child.
+    // We want the child to appear at (dx, dy).
+    // Matrix4.identity()..translate(dx, dy)..scale(finalScale);
+    // However, InteractiveViewer content coordinates usually start at 0,0.
+    // If we translate, we move the content. 
+    
+    _transformationController.value = Matrix4.identity()
+      ..translate(dx, dy)
+      ..scale(finalScale);
+      
     ref.read(projectProvider.notifier).setCanvasScale(finalScale);
   }
+
 
   // --- Handlers ---
 
   Future<void> _handleSave(BuildContext context, WidgetRef ref) async {
+    final state = ref.read(projectProvider);
+    if (state.currentProjectPath != null && state.currentProjectPath!.isNotEmpty) {
+      // Overwrite existing file
+      await ref.read(projectProvider.notifier).saveProject(state.currentProjectPath!);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto salvo!")));
+      }
+    } else {
+      // If no file path, behave like Save As
+      await _handleSaveAs(context, ref);
+    }
+  }
+
+  Future<void> _handleSaveAs(BuildContext context, WidgetRef ref) async {
     final result = await FilePicker.platform.saveFile(
-      dialogTitle: "Save Project",
+      dialogTitle: "Salvar Como",
       fileName: "album_project.alem",
       allowedExtensions: ['alem'],
     );
@@ -1440,22 +1830,198 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     }
   }
 
-  void _showExportingDialog(BuildContext context) {
+  void _showExportingDialog(BuildContext context, {String message = "Exportando para JPG..."}) {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => const AlertDialog(
+      builder: (ctx) => AlertDialog(
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(),
-            SizedBox(height: 16),
-            Text("Exportando projeto..."),
-            Text("Aguarde, processando todas as páginas.", style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(message),
+            if (message == "Exportando para JPG...") ...[
+               const Text("Aguarde, processando todas as páginas.", style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ]
           ],
         ),
       ),
     );
+  }
+
+  // --- Batch Export Logic ---
+
+  Future<void> _showBatchExportDialog(BuildContext context) async {
+      // 1. Select Input Folder
+      String? inputPath = await FilePicker.platform.getDirectoryPath(
+         dialogTitle: "Selecione a PASTA PAI (onde estão os projetos)",
+      );
+      if (inputPath == null) return;
+
+      // 2. Select Output Folder
+      String? outputPath = await FilePicker.platform.getDirectoryPath(
+         dialogTitle: "Selecione a PASTA DE SAÍDA (onde criar as JPGs)",
+      );
+      if (outputPath == null) return;
+
+      // Confirmation
+      final confirm = await showDialog<bool>(
+         context: context,
+         builder: (ctx) => AlertDialog(
+            title: const Text("Iniciar Exportação em Lote?"),
+            content: Text("Origem: $inputPath\nDestino: $outputPath\n\nO processo pode demorar. Não feche a janela."),
+            actions: [
+               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancelar")),
+               TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Iniciar")),
+            ],
+         )
+      );
+
+      if (confirm == true) {
+         _runBatchExport(inputPath, outputPath);
+      }
+  }
+
+  Future<void> _runBatchExport(String inputRoot, String outputRoot) async {
+     try {
+        _showExportingDialog(context, message: "Iniciando processo em lote...");
+        
+        // 1. Find Projects
+        final dir = Directory(inputRoot);
+        final projectFiles = dir.listSync(recursive: true).where((f) => f.path.toLowerCase().endsWith('.alem')).toList();
+        
+        if (projectFiles.isEmpty) {
+           Navigator.pop(context); // Close loading
+           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Nenhum projeto (.alem) encontrado!")));
+           return;
+        }
+
+        int total = projectFiles.length;
+        for (int i=0; i<total; i++) {
+           final pFile = projectFiles[i];
+           final pPath = pFile.path;
+           final pName = p.basenameWithoutExtension(pPath);
+           
+           // Update Progress UI (Close previous dialog, open new one)
+           if (mounted) {
+              Navigator.pop(context); 
+              _showExportingDialog(context, message: "Projeto ${i+1}/$total: $pName");
+           }
+           
+           // Load Project
+           await ref.read(projectProvider.notifier).loadProject(pPath);
+           
+           // Wait for load settle
+           await Future.delayed(const Duration(seconds: 2));
+           
+           final state = ref.read(projectProvider);
+           final double exportPixelRatio = state.project.ppi / 25.4;
+
+           // Create Output Subfolder
+           final projOutputDir = Directory(p.join(outputRoot, pName));
+           if (!projOutputDir.existsSync()) {
+              projOutputDir.createSync(recursive: true);
+           }
+           
+           // Enable Export Mode
+           ref.read(projectProvider.notifier).setIsExporting(true);
+           await Future.delayed(const Duration(milliseconds: 300));
+           
+           // Iterate Pages
+           for (int pageIdx = 0; pageIdx < state.project.pages.length; pageIdx++) {
+              final page = state.project.pages[pageIdx];
+              
+              // PRE-LOAD IMAGES - CRITICAL FIX
+              // Explicitly load all images into memory cache before showing the page
+              await Future.wait(page.photos.map((p) async {
+                 if (p.path.isNotEmpty) {
+                    try {
+                        await ImageLoader.loadImage(p.path);
+                    } catch (e) {
+                        print("Error pre-loading ${p.path}: $e");
+                    }
+                 }
+              }));
+
+              ref.read(projectProvider.notifier).setPageIndex(pageIdx);
+              ref.read(projectProvider.notifier).selectPhoto(null);
+              ref.read(projectProvider.notifier).setEditingContent(false);
+              
+              // Wait for render - Reduced to 2s as images are pre-loaded
+              await Future.delayed(const Duration(milliseconds: 2000));
+              
+              final bytes = await ExportHelper.captureKeyToBytes(_canvasCaptureKey, pixelRatio: exportPixelRatio);
+              if (bytes != null) {
+                 final pageNum = (pageIdx + 1).toString().padLeft(2, '0');
+                 final fileName = "${pName}_$pageNum.jpg";
+                 final filePath = p.join(projOutputDir.path, fileName);
+                 
+                 // Use Helper with DPI
+                 await ExportHelper.saveAsHighResJpg(
+                    pngBytes: bytes, 
+                    path: filePath, 
+                    dpi: state.project.ppi.toInt()
+                 );
+              }
+           }
+           
+           // Disable Export Mode
+           ref.read(projectProvider.notifier).setIsExporting(false);
+        }
+        
+        // Close last loading
+        if (mounted) Navigator.pop(context); 
+        
+        if (mounted) {
+           await showDialog(
+              context: context, 
+              builder: (ctx) => AlertDialog(
+                 title: const Text("Concluído"),
+                 content: Text("Processados $total projetos com sucesso!"),
+                 actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("OK"))],
+              )
+           );
+        }
+
+     } catch (e) {
+        if (mounted) Navigator.pop(context); // Close loading
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erro no lote: $e")));
+     }
+  }
+
+  Future<void> _handleAutoSelect(BuildContext context, ProjectNotifier notifier) async {
+     final progressMsg = ValueNotifier<String>("Iniciando...");
+     
+     // Show Dialog
+     showDialog(
+       context: context,
+       barrierDismissible: false,
+       builder: (ctx) {
+          return ValueListenableBuilder<String>(
+             valueListenable: progressMsg,
+             builder: (c, val, _) => AlertDialog(
+                content: Column(
+                   mainAxisSize: MainAxisSize.min,
+                   children: [
+                       const CircularProgressIndicator(),
+                       const SizedBox(height: 16),
+                       const Text("AutoSelect Inteligente", style: TextStyle(fontWeight: FontWeight.bold)),
+                       const SizedBox(height: 8),
+                       Text(val, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+                   ],
+                ),
+             ),
+          );
+       },
+     );
+     
+     await notifier.runAutoSelect(onProgress: (phase, proc, total, sel) {
+         progressMsg.value = "$phase\nAnalizado: $proc / $total\nSelecionadas: $sel";
+     });
+     
+     // Pop Config
+     if (context.mounted) Navigator.pop(context);
   }
 
   // Extra helper because I can't easily pass the keys of unrendered pages
@@ -1547,92 +2113,324 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
 
   void _handleAssetDrop(WidgetRef ref, Offset dropPos, LibraryAsset asset, AlbumPage currentPage) {
     if (asset.type == AssetType.element) {
-      // Elements are just placed as decorative items
-      final item = PhotoItem(
-        path: asset.path,
-        x: dropPos.dx - 50,
-        y: dropPos.dy - 50,
-        width: 100,
-        height: 100,
-        zIndex: 10, // Higher default for elements
-      );
-      ref.read(projectProvider.notifier).addPhotoToCurrentPage(item);
+       // Check for Background Tag or Filename
+       // If tagged as "fundo", ask if apply to all pages
+       final isBackground = asset.path.toLowerCase().contains("fundo") || asset.tags.contains("fundo");
+       
+       if (isBackground) {
+           showDialog(
+             context: context,
+             builder: (ctx) => AlertDialog(
+               title: const Text("Adicionar Fundo"),
+               content: const Text("Deseja aplicar este fundo em TODAS as páginas do projeto ou somente nesta?"),
+               actions: [
+                 TextButton(
+                   onPressed: () {
+                     Navigator.pop(ctx);
+                     // Single Page (Default) - Z-Index 0 (Bottom)
+                     _addBackgroundToPage(ref, asset, dropPos, singlePage: true);
+                   }, 
+                   child: const Text("Somente Nesta")
+                 ),
+                 ElevatedButton(
+                   onPressed: () {
+                     Navigator.pop(ctx);
+                     // All Pages
+                     _addBackgroundToPage(ref, asset, dropPos, singlePage: false);
+                   },
+                   child: const Text("Todas as Páginas"),
+                 )
+               ],
+             )
+           );
+       } else {
+          // Standard Element Drop
+          final item = PhotoItem(
+            id: Uuid().v4(),
+            path: asset.path,
+            x: dropPos.dx - 50,
+            y: dropPos.dy - 50,
+            width: 100,
+            height: 100,
+            zIndex: 10,
+          );
+          ref.read(projectProvider.notifier).addPhotoToCurrentPage(item);
+       }
     } else {
       // Template logic: Frames with holes
-      final double width = currentPage.widthMm;
-      final double height = currentPage.heightMm;
+      final double pageWidth = currentPage.widthMm;
+      final double pageHeight = currentPage.heightMm;
       
-      // 1. Add Template Frame (Top Level)
+      // 1. Template Frame (Top Level)
       final templateItem = PhotoItem(
+        id: Uuid().v4(), // Fix: Ensure ID is generated
         path: asset.path,
+        // Full page frame
         x: 0, 
         y: 0,
-        width: width,
-        height: height,
+        width: pageWidth,
+        height: pageHeight,
         zIndex: 5, // Frame usually on top of photos
       );
       
-      PhotoItem contentItem;
-      bool isExisting = false;
+      // 2. Identify Holes
+      List<Rect> holes = [];
+      if (asset.holes.isNotEmpty) {
+         holes = asset.holes;
+      } else if (asset.holeX != null) {
+         // Legacy single hole
+         holes.add(Rect.fromLTWH(asset.holeX!, asset.holeY!, asset.holeW!, asset.holeH!));
+      } else {
+         // Default center hole if none defined
+         holes.add(const Rect.fromLTWH(0.1, 0.1, 0.8, 0.8));
+      }
+
+      // 3. Map Photos to Holes
+      // We prioritize existing photos with content.
+      final existingPhotos = currentPage.photos.where((p) => p.path.isNotEmpty).toList();
+      List<PhotoItem> newPhotos = [];
       
-      // Determine what goes inside the hole
-      final firstPhoto = currentPage.photos.where((p) => p.path.isNotEmpty).toList();
-      if (firstPhoto.isNotEmpty) {
-        // Reuse first existing photo
-        contentItem = firstPhoto.last.copyWith(); // Use the top-most photo
-        isExisting = true;
-      } else {
-        // Create Placeholder
-        contentItem = PhotoItem(path: "");
-      }
-
-      // Position content inside the detected hole
-      if (asset.holeX != null) {
-        // Add a small "bleeding" (1% extra) to ensure no gaps at edges
-        final double bleedW = asset.holeW! * 0.01;
-        final double bleedH = asset.holeH! * 0.01;
+      for (int i = 0; i < holes.length; i++) {
+        final hole = holes[i];
         
-        contentItem = contentItem.copyWith(
-          x: (asset.holeX! - bleedW) * width,
-          y: (asset.holeY! - bleedH) * height,
-          width: (asset.holeW! + 2 * bleedW) * width,
-          height: (asset.holeH! + 2 * bleedH) * height,
-          zIndex: 1, // Photos behind frame
-          contentScale: 1.0, // Reset transformations for new hole
-          contentX: 0.0,
-          contentY: 0.0,
-        );
-      } else {
-        // Default to center if no hole detected
-        contentItem = contentItem.copyWith(
-          x: width * 0.1,
-          y: height * 0.1,
-          width: width * 0.8,
-          height: height * 0.8,
-          zIndex: 1,
-          contentScale: 1.0,
-          contentX: 0.0,
-          contentY: 0.0,
-        );
-      }
+        // Bleeding calculation (1%)
+        final double bleedW = hole.width * 0.01;
+        final double bleedH = hole.height * 0.01;
+        final double finalX = (hole.left - bleedW) * pageWidth;
+        final double finalY = (hole.top - bleedH) * pageHeight;
+        final double finalW = (hole.width + 2 * bleedW) * pageWidth;
+        final double finalH = (hole.height + 2 * bleedH) * pageHeight;
 
-      if (isExisting) {
-        // We modify the existing photo AND add the template
-        // To keep it atomic, we can use updatePageLayout or manually combine
-        final List<PhotoItem> newPhotos = currentPage.photos.map((p) {
-          if (p.id == contentItem.id) return contentItem;
-          return p;
-        }).toList();
-        
-        if (!newPhotos.any((p) => p.path == asset.path)) {
-           newPhotos.add(templateItem);
+        if (i < existingPhotos.length) {
+           // Reuse existing photo, update its geometry
+           final p = existingPhotos[i].copyWith(
+             x: finalX, y: finalY, width: finalW, height: finalH,
+             zIndex: 1, // Photos behind frame
+             contentScale: 1.0, 
+             contentX: 0.0, 
+             contentY: 0.0,
+           );
+           newPhotos.add(p);
+        } else {
+           // Create Placeholder for empty hole
+           final p = PhotoItem(
+             id: Uuid().v4(),
+             path: "",
+             x: finalX, y: finalY, width: finalW, height: finalH,
+             zIndex: 1,
+           );
+           newPhotos.add(p);
         }
-        
-        ref.read(projectProvider.notifier).updatePageLayout(newPhotos);
-      } else {
-        // Add both as new items
-        ref.read(projectProvider.notifier).addPhotosToCurrentPage([contentItem, templateItem]);
       }
+
+      // 4. Handle extra existing photos (if any)
+      // Keep them in the list so they don't disappear, but they might be obscured or floating
+      if (existingPhotos.length > holes.length) {
+         newPhotos.addAll(existingPhotos.sublist(holes.length));
+      }
+      
+      // Add the template frame last (or handled by zIndex)
+      // We want to ensure we don't duplicate if for some reason we drag the same template?
+      // But here we are replacing layout fundamentally.
+      newPhotos.add(templateItem);
+
+      // Replace page content
+      ref.read(projectProvider.notifier).updatePageLayout(newPhotos);
     }
+  }
+
+  void _addBackgroundToPage(WidgetRef ref, LibraryAsset asset, Offset dropPos, {required bool singlePage}) {
+      // Background logic: specific geometry or just image?
+      // Usually background fills the page (width/height of page).
+      // Assuming 100x100 for now if drag-dropped as element, OR full page?
+      // "Background" usually implies Full Page.
+      // Let's assume full page if it's a "background" asset.
+      
+      final state = ref.read(projectProvider);
+      
+      if (singlePage) {
+         final page = state.project.pages[state.project.currentPageIndex];
+         final bgItem = PhotoItem(
+            id: Uuid().v4(),
+            path: asset.path,
+            x: 0, 
+            y: 0, 
+            width: page.widthMm, 
+            height: page.heightMm,
+            zIndex: 0, // Bottom
+         );
+         ref.read(projectProvider.notifier).addPhotoToCurrentPage(bgItem);
+      } else {
+         // Apply to ALL pages
+         final updatedPages = <AlbumPage>[];
+         for (var page in state.project.pages) {
+            final bgItem = PhotoItem(
+               id: Uuid().v4(),
+               path: asset.path,
+               x: 0, 
+               y: 0, 
+               width: page.widthMm, 
+               height: page.heightMm,
+               zIndex: 0, // Bottom
+            );
+            // Add to start of list (bottom z-order visually if zIndex handled correctly, or verify zIndex sorting)
+            // Existing logic uses zIndex property.
+            updatedPages.add(page.copyWith(photos: [bgItem, ...page.photos]));
+         }
+         
+         ref.read(projectProvider.notifier).replaceAllPages(updatedPages);
+       }
+   }
+}
+
+class _NewProjectDialog extends StatefulWidget {
+  final Function(double width, double height, int dpi) onCreate;
+  const _NewProjectDialog({required this.onCreate});
+
+  @override
+  State<_NewProjectDialog> createState() => _NewProjectDialogState();
+}
+
+class _NewProjectDialogState extends State<_NewProjectDialog> {
+  // Presets in CM
+  final List<Map<String, dynamic>> presets = [
+    {"label": "Padrão (30.5 x 21.5)", "w": 30.5, "h": 21.5},
+    {"label": "Quadrado (30 x 30)", "w": 30.0, "h": 30.0},
+    {"label": "Quadrado Grande (35 x 35)", "w": 35.0, "h": 35.0},
+    {"label": "Retrato/Paisagem (30 x 40)", "w": 30.0, "h": 40.0},
+    {"label": "Pequeno (20 x 25)", "w": 20.0, "h": 25.0},
+  ];
+
+  int _selectedIndex = 0;
+  bool _isHorizontal = true;
+  final TextEditingController _dpiCtrl = TextEditingController(text: "300");
+
+  @override
+  Widget build(BuildContext context) {
+    // Current base dimensions
+    double baseW = presets[_selectedIndex]["w"];
+    double baseH = presets[_selectedIndex]["h"];
+    
+    // Apply orientation logic
+    double finalW = _isHorizontal ? (baseW > baseH ? baseW : baseH) : (baseW < baseH ? baseW : baseH);
+    double finalH = _isHorizontal ? (baseW > baseH ? baseH : baseW) : (baseW < baseH ? baseH : baseW);
+    // Square check
+    if ((baseW - baseH).abs() < 0.1) {
+       finalW = baseW; finalH = baseH;
+    }
+
+    return AlertDialog(
+      backgroundColor: const Color(0xFF2C2C2C),
+      title: const Text("Novo Projeto", style: TextStyle(color: Colors.white)),
+      content: SizedBox(
+        width: 350,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+             const Text("Tamanho e Orientação:", style: TextStyle(color: Colors.white70)),
+             const SizedBox(height: 10),
+             Container(
+               padding: const EdgeInsets.symmetric(horizontal: 12),
+               decoration: BoxDecoration(
+                 color: Colors.white10,
+                 borderRadius: BorderRadius.circular(4),
+               ),
+               child: DropdownButtonHideUnderline(
+                 child: DropdownButton<int>(
+                   value: _selectedIndex,
+                   isExpanded: true,
+                   dropdownColor: const Color(0xFF333333),
+                   style: const TextStyle(color: Colors.white),
+                   icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+                   items: List.generate(presets.length, (i) {
+                      return DropdownMenuItem(
+                        value: i,
+                        child: Text(presets[i]["label"]),
+                      );
+                   }),
+                   onChanged: (val) {
+                     if (val != null) setState(() => _selectedIndex = val);
+                   },
+                 ),
+               ),
+             ),
+             const SizedBox(height: 16),
+             Row(
+               children: [
+                 Expanded(
+                   child: Column(
+                     crossAxisAlignment: CrossAxisAlignment.start,
+                     children: [
+                       const Text("Orientação:", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                       const SizedBox(height: 4),
+                       ToggleButtons(
+                         isSelected: [_isHorizontal, !_isHorizontal],
+                         onPressed: (idx) {
+                            setState(() => _isHorizontal = idx == 0);
+                         },
+                         borderRadius: BorderRadius.circular(4),
+                         fillColor: Colors.blueAccent,
+                         selectedColor: Colors.white,
+                         color: Colors.white54,
+                         constraints: const BoxConstraints(minWidth: 60, minHeight: 36),
+                         children: const [
+                           Icon(Icons.landscape, size: 20),
+                           Icon(Icons.portrait, size: 20),
+                         ]
+                       ),
+                     ],
+                   ),
+                 ),
+                 const SizedBox(width: 16),
+                 Expanded(
+                   child: Column(
+                     crossAxisAlignment: CrossAxisAlignment.start,
+                     children: [
+                       const Text("DPI:", style: TextStyle(color: Colors.white54, fontSize: 12)),
+                       const SizedBox(height: 4),
+                       SizedBox(
+                         height: 36,
+                         child: TextField(
+                           controller: _dpiCtrl,
+                           style: const TextStyle(color: Colors.white),
+                           keyboardType: TextInputType.number,
+                           decoration: const InputDecoration(
+                             contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                             filled: true,
+                             fillColor: Colors.white10,
+                             border: OutlineInputBorder(borderSide: BorderSide.none),
+                           ),
+                         ),
+                       ),
+                     ],
+                   ),
+                 ),
+               ],
+             ),
+             const SizedBox(height: 16),
+             Text(
+               "Dimensões Finais: ${finalW.toStringAsFixed(1)} cm x ${finalH.toStringAsFixed(1)} cm",
+               style: const TextStyle(color: Colors.white54, fontSize: 13),
+             ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context), 
+          child: const Text("Cancelar", style: TextStyle(color: Colors.white54))
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+          onPressed: () {
+             final dpi = int.tryParse(_dpiCtrl.text) ?? 300;
+             // Convert CM to MM
+             widget.onCreate(finalW * 10, finalH * 10, dpi);
+          },
+          child: const Text("Criar Projeto"),
+        ),
+      ],
+    );
   }
 }

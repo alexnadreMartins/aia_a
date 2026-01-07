@@ -2,10 +2,12 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/project_model.dart';
 import '../../logic/image_loader.dart';
+import '../../logic/cache_provider.dart';
 
-class PhotoManipulator extends StatefulWidget {
+class PhotoManipulator extends ConsumerStatefulWidget {
   final PhotoItem photo;
   final bool isSelected;
   final Function(PhotoItem) onUpdate;
@@ -37,10 +39,10 @@ class PhotoManipulator extends StatefulWidget {
   });
 
   @override
-  State<PhotoManipulator> createState() => _PhotoManipulatorState();
+  ConsumerState<PhotoManipulator> createState() => _PhotoManipulatorState();
 }
 
-class _PhotoManipulatorState extends State<PhotoManipulator> {
+class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
   ui.Image? _uiImage;
   String? _lastPath;
 
@@ -82,6 +84,11 @@ class _PhotoManipulatorState extends State<PhotoManipulator> {
 
   @override
   Widget build(BuildContext context) {
+    // Listen for external updates (e.g. from Editor Save)
+    ref.listen(imageVersionProvider(widget.photo.path), (prev, next) {
+       _loadImage();
+    });
+
     final photo = widget.photo;
     final angle = photo.rotation * (math.pi / 180);
 
@@ -268,6 +275,8 @@ class PhotoPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0 || size.width.isNaN || size.height.isNaN) return;
+
     final paint = Paint()..isAntiAlias = true;
 
     // Check if this is a text label
@@ -359,6 +368,9 @@ class PhotoPainter extends CustomPainter {
     // 1. Calculate Base "Cover" scale
     double imgW = image!.width.toDouble();
     double imgH = image!.height.toDouble();
+
+    // CRASH GUARD: Invalid Dimensions
+    if (imgW <= 0 || imgH <= 0 || size.width <= 0 || size.height <= 0) return;
     
     // EXIF Orientation check
     final int orient = photo.exifOrientation;
@@ -421,7 +433,9 @@ class PhotoPainter extends CustomPainter {
     }
 
     canvas.scale(finalScale);
+
     paint.color = Colors.white;
+    paint.filterQuality = FilterQuality.high;
     canvas.drawImage(image!, Offset(-image!.width / 2, -image!.height / 2), paint);
     canvas.restore();
   }
@@ -445,7 +459,8 @@ class PhotoPainter extends CustomPainter {
   void _drawHandles(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = Colors.white
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.fill
+      ..filterQuality = FilterQuality.high;
     
     final borderPaint = Paint()
       ..color = Colors.blue

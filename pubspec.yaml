@@ -53,6 +53,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   exif: ^3.3.0
   firedart: ^0.9.8
+  google_generative_ai: ^0.4.7
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:

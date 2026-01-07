@@ -36,7 +36,7 @@ class PhotoItem {
     this.contentX = 0,
     this.contentY = 0,
     this.contentScale = 1.0,
-  }) : id = id ?? const Uuid().v4();
+  }) : id = id ?? Uuid().v4();
 
   PhotoItem copyWith({
     String? id,
@@ -117,20 +117,23 @@ class AlbumPage {
   final double heightMm;
   final int backgroundColor; // ARGB int
   final List<PhotoItem> photos;
+  final int pageNumber;
 
   AlbumPage({
     String? id,
     required this.widthMm,
     required this.heightMm,
     this.backgroundColor = 0xFFFFFFFF, // White default
+    this.pageNumber = 0,
     List<PhotoItem>? photos,
-  })  : id = id ?? const Uuid().v4(),
+  })  : id = id ?? Uuid().v4(),
         photos = photos ?? [];
 
   AlbumPage copyWith({
     double? widthMm,
     double? heightMm,
     int? backgroundColor,
+    int? pageNumber,
     List<PhotoItem>? photos,
   }) {
     return AlbumPage(
@@ -138,6 +141,7 @@ class AlbumPage {
       widthMm: widthMm ?? this.widthMm,
       heightMm: heightMm ?? this.heightMm,
       backgroundColor: backgroundColor ?? this.backgroundColor,
+      pageNumber: pageNumber ?? this.pageNumber,
       photos: photos ?? this.photos.map((p) => p.copyWith()).toList(),
     );
   }
@@ -148,6 +152,7 @@ class AlbumPage {
       'widthMm': widthMm,
       'heightMm': heightMm,
       'backgroundColor': backgroundColor,
+      'pageNumber': pageNumber,
       'photos': photos.map((p) => p.toJson()).toList(),
     };
   }
@@ -158,6 +163,7 @@ class AlbumPage {
       widthMm: (json['widthMm'] as num).toDouble(),
       heightMm: (json['heightMm'] as num).toDouble(),
       backgroundColor: json['backgroundColor'] as int,
+      pageNumber: json['pageNumber'] as int? ?? 0,
       photos: (json['photos'] as List)
           .map((p) => PhotoItem.fromJson(p as Map<String, dynamic>))
           .toList(),
@@ -184,7 +190,7 @@ class Project {
     List<String>? allImagePaths,
     Map<String, int>? imageRotations,
     this.currentPageIndex = 0,
-  })  : id = id ?? const Uuid().v4(),
+  })  : id = id ?? Uuid().v4(),
         pages = pages ?? [],
         allImagePaths = allImagePaths ?? [],
         imageRotations = imageRotations ?? {};

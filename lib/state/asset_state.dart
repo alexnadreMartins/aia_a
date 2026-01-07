@@ -9,18 +9,22 @@ import '../models/asset_model.dart';
 class AssetLibraryState {
   final List<AssetCollection> collections;
   final bool isLoading;
+  final Set<String> selectedAssetIds;
 
   AssetLibraryState({
     this.collections = const [],
     this.isLoading = false,
+    this.selectedAssetIds = const {},
   });
 
   AssetLibraryState copyWith({
     List<AssetCollection>? collections,
     bool? isLoading,
+    Set<String>? selectedAssetIds,
   }) => AssetLibraryState(
     collections: collections ?? this.collections,
     isLoading: isLoading ?? this.isLoading,
+    selectedAssetIds: selectedAssetIds ?? this.selectedAssetIds,
   );
 }
 
@@ -28,7 +32,8 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
   AssetNotifier() : super(AssetLibraryState(isLoading: true)) {
     loadLibrary();
   }
-
+  
+  // Storage logic
   Future<File> _getStorageFile() async {
     final dir = await getApplicationSupportDirectory();
     final assetDir = Directory('${dir.path}/assets');
@@ -65,6 +70,49 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
     }
   }
 
+  // Selection Logic
+  void toggleSelection(String assetId) {
+    final current = Set<String>.from(state.selectedAssetIds);
+    if (current.contains(assetId)) {
+      current.remove(assetId);
+    } else {
+      current.add(assetId);
+    }
+    state = state.copyWith(selectedAssetIds: current);
+  }
+
+  void selectSingle(String assetId) {
+    state = state.copyWith(selectedAssetIds: {assetId});
+  }
+
+  void selectAll() {
+    final allIds = state.collections.expand((c) => c.assets).map((a) => a.id).toSet();
+    state = state.copyWith(selectedAssetIds: allIds);
+  }
+
+  void deselectAll() {
+    state = state.copyWith(selectedAssetIds: {});
+  }
+
+  void selectRange(String fromId, String toId) {
+    // Flatten all assets to find range
+    final allAssets = state.collections.expand((c) => c.assets).toList();
+    final fromIndex = allAssets.indexWhere((a) => a.id == fromId);
+    final toIndex = allAssets.indexWhere((a) => a.id == toId);
+
+    if (fromIndex == -1 || toIndex == -1) return;
+
+    final start = fromIndex < toIndex ? fromIndex : toIndex;
+    final end = fromIndex < toIndex ? toIndex : fromIndex;
+
+    final rangeIds = allAssets.sublist(start, end + 1).map((a) => a.id).toSet();
+    final current = Set<String>.from(state.selectedAssetIds);
+    current.addAll(rangeIds);
+    
+    state = state.copyWith(selectedAssetIds: current);
+  }
+
+  // Collection Management
   void addCollection(String name) {
     state = state.copyWith(
       collections: [...state.collections, AssetCollection(name: name)],
@@ -86,6 +134,14 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
     for (var p in paths) {
       final name = p.split(Platform.pathSeparator).last;
       
+      // Get File Date
+      DateTime? fDate;
+      try {
+        fDate = await File(p).lastModified();
+      } catch (e) {
+        debugPrint("Error reading date for $p: $e");
+      }
+
       double? hX, hY, hW, hH;
       if (type == AssetType.template) {
         final hole = await _detectHole(p);
@@ -105,6 +161,7 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
         holeY: hY,
         holeW: hW,
         holeH: hH,
+        fileDate: fDate,
       ));
     }
 
@@ -137,8 +194,6 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
       for (int y = 0; y < image.height; y++) {
         for (int x = 0; x < image.width; x++) {
           final pixel = image.getPixel(x, y);
-          // Check alpha channel. In 'image' package 4.x, getAlpha might be needed or pixel value check.
-          // For most formats, pixel.a is the alpha (0-255).
           if (pixel.a < 10) { // Nearly transparent
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
@@ -151,7 +206,6 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
 
       if (!found) return null;
 
-      // Return as logical 0-1 range for flexibility
       return Rect.fromLTRB(
         minX / image.width, 
         minY / image.height, 

@@ -1,3 +1,4 @@
+import 'dart:ui';
 import 'package:uuid/uuid.dart';
 
 enum AssetType { element, template }
@@ -9,10 +10,20 @@ class LibraryAsset {
   final AssetType type;
   
   // Logical coordinates (0-1) for templates
+  // Deprecated single hole fields - kep for compat or single hole simple logic
   final double? holeX;
   final double? holeY;
   final double? holeW;
   final double? holeH;
+  final DateTime? fileDate;
+  final int? width;
+  final int? height;
+  
+  // New: Multiple holes support
+  final List<Rect> holes;
+  // Compatibility fields for main_window usage
+  final String processedPath;
+  final List<String> tags;
 
   LibraryAsset({
     String? id,
@@ -23,7 +34,14 @@ class LibraryAsset {
     this.holeY,
     this.holeW,
     this.holeH,
-  }) : id = id ?? const Uuid().v4();
+    this.fileDate,
+    this.width,
+    this.height,
+    List<Rect>? holes,
+    this.processedPath = "",
+    this.tags = const [],
+  }) : id = id ?? Uuid().v4(),
+       holes = holes ?? [];
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -34,18 +52,49 @@ class LibraryAsset {
     'holeY': holeY,
     'holeW': holeW,
     'holeH': holeH,
+    'fileDate': fileDate?.toIso8601String(),
+    'width': width,
+    'height': height,
+    'holes': holes.map((h) => {'l': h.left, 't': h.top, 'w': h.width, 'h': h.height}).toList(),
   };
 
-  factory LibraryAsset.fromJson(Map<String, dynamic> json) => LibraryAsset(
-    id: json['id'],
-    path: json['path'],
-    name: json['name'],
-    type: AssetType.values.firstWhere((e) => e.name == json['type'], orElse: () => AssetType.element),
-    holeX: json['holeX']?.toDouble(),
-    holeY: json['holeY']?.toDouble(),
-    holeW: json['holeW']?.toDouble(),
-    holeH: json['holeH']?.toDouble(),
-  );
+  factory LibraryAsset.fromJson(Map<String, dynamic> json) {
+    // Parse holes
+    List<Rect> parsedHoles = [];
+    if (json['holes'] != null) {
+      parsedHoles = (json['holes'] as List).map((h) {
+         return Rect.fromLTWH(
+           (h['l'] as num).toDouble(),
+           (h['t'] as num).toDouble(),
+           (h['w'] as num).toDouble(),
+           (h['h'] as num).toDouble(),
+         );
+      }).toList();
+    } else if (json['holeX'] != null) {
+       // Migration: Single hole to list
+       parsedHoles.add(Rect.fromLTWH(
+          (json['holeX'] as num).toDouble(),
+          (json['holeY'] as num).toDouble(),
+          (json['holeW'] as num).toDouble(),
+          (json['holeH'] as num).toDouble(),
+       ));
+    }
+
+    return LibraryAsset(
+      id: json['id'],
+      path: json['path'],
+      name: json['name'],
+      type: AssetType.values.firstWhere((e) => e.name == json['type'], orElse: () => AssetType.element),
+      holeX: json['holeX']?.toDouble(),
+      holeY: json['holeY']?.toDouble(),
+      holeW: json['holeW']?.toDouble(),
+      holeH: json['holeH']?.toDouble(),
+      fileDate: json['fileDate'] != null ? DateTime.parse(json['fileDate']) : null,
+      width: json['width'],
+      height: json['height'],
+      holes: parsedHoles,
+    );
+  }
 }
 
 class AssetCollection {
@@ -57,7 +106,7 @@ class AssetCollection {
     String? id,
     required this.name,
     List<LibraryAsset>? assets,
-  })  : id = id ?? const Uuid().v4(),
+  })  : id = id ?? Uuid().v4(),
         assets = assets ?? [];
 
   AssetCollection copyWith({
