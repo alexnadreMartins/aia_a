@@ -14,6 +14,7 @@ import 'histogram_graph.dart';
 import 'waveform_scope.dart';
 import 'vectorscope_scope.dart';
 import 'scope_widget.dart';
+import '../editor/image_editor_view.dart';
 
 import 'dart:ui' as ui;
 
@@ -225,7 +226,7 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
     });
     // Set initial path
     if (_showEditor) {
-      ref.read(imageEditorProvider.notifier).setPath(widget.paths[_currentIndex]);
+      ref.read(imageEditorProvider.notifier).setImages([widget.paths[_currentIndex]], 0);
     }
   }
 
@@ -236,11 +237,11 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
     
     // Capture current values
     print("Save Debug: Capturing values for $path");
-    print("Save Debug: Exposure: ${editorState.exposure}");
-    print("Save Debug: Contrast: ${editorState.contrast}");
-    print("Save Debug: Brightness: ${editorState.brightness}");
-    print("Save Debug: Saturation: ${editorState.saturation}");
-    print("Save Debug: Sharpness: ${editorState.sharpness}");
+    print("Save Debug: Exposure: ${editorState.currentAdjustments.exposure}");
+    print("Save Debug: Contrast: ${editorState.currentAdjustments.contrast}");
+    print("Save Debug: Brightness: ${editorState.currentAdjustments.brightness}");
+    print("Save Debug: Saturation: ${editorState.currentAdjustments.saturation}");
+    print("Save Debug: Sharpness: ${editorState.currentAdjustments.sharpness}");
     
     if (editorState.isProcessing) return;
     notifier.setProcessing(true);
@@ -249,14 +250,14 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
     try {
        await compute(_applyAndSaveTask, _SaveTaskArgs(
           path: path,
-          exposure: editorState.exposure,
-          contrast: editorState.contrast,
-          brightness: editorState.brightness,
-          saturation: editorState.saturation,
-          sharpness: editorState.sharpness,
-          noiseReduction: editorState.noiseReduction,
-          temperature: editorState.temperature,
-          tint: editorState.tint,
+          exposure: editorState.currentAdjustments.exposure,
+          contrast: editorState.currentAdjustments.contrast,
+          brightness: editorState.currentAdjustments.brightness,
+          saturation: editorState.currentAdjustments.saturation,
+          sharpness: editorState.currentAdjustments.sharpness,
+          noiseReduction: editorState.currentAdjustments.noiseReduction,
+          temperature: editorState.currentAdjustments.temperature,
+          tint: editorState.currentAdjustments.tint,
        ));
        
        if (mounted) {
@@ -269,7 +270,7 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
           notifier.reset(); 
           // Re-set path to keep context (reset clears path too?)
           // ImageEditorNotifier.reset() does `state = const ImageEditorState()`, which clears originalPath.
-          notifier.setPath(path);
+          notifier.setImages([path], 0);
           
           setState(() {}); // Refresh UI
        }
@@ -294,12 +295,12 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
 
     // Calculate Matrix for Editor
     final matrix = ColorMatrixHelper.getMatrix(
-       exposure: editorState.exposure,
-       contrast: editorState.contrast,
-       brightness: editorState.brightness,
-       saturation: editorState.saturation,
-       temperature: editorState.temperature,
-       tint: editorState.tint
+       exposure: editorState.currentAdjustments.exposure,
+       contrast: editorState.currentAdjustments.contrast,
+       brightness: editorState.currentAdjustments.brightness,
+       saturation: editorState.currentAdjustments.saturation,
+       temperature: editorState.currentAdjustments.temperature,
+       tint: editorState.currentAdjustments.tint
     );
 
     return Scaffold(
@@ -329,7 +330,7 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                         // Reset Editor when changing photos
                         if (_showEditor) {
                           notifier.reset();
-                          notifier.setPath(widget.paths[index]);
+                          notifier.setImages([widget.paths[index]], 0);
                         }
                       },
                       itemBuilder: (context, index) {
@@ -387,8 +388,8 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                                           child: applyFilter 
                                             ? ImageFiltered(
                                                 imageFilter: ui.ImageFilter.blur(
-                                                   sigmaX: (editorState.noiseReduction * 5) + (editorState.skinSmooth * 3),
-                                                   sigmaY: (editorState.noiseReduction * 5) + (editorState.skinSmooth * 3),
+                                                   sigmaX: (editorState.currentAdjustments.noiseReduction * 5) + (editorState.currentAdjustments.skinSmooth * 3),
+                                                   sigmaY: (editorState.currentAdjustments.noiseReduction * 5) + (editorState.currentAdjustments.skinSmooth * 3),
                                                 ),
                                                 child: ColorFiltered(
                                                     colorFilter: ColorFilter.matrix(matrix),
@@ -490,9 +491,17 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                           IconButton(icon: const Icon(Icons.rotate_right, color: Colors.white), onPressed: () => _rotate(true)),
                           Container(height: 24, width: 1, color: Colors.white24, margin: const EdgeInsets.symmetric(horizontal: 16)),
                           IconButton(
-                             icon: Icon(Icons.tune, color: _showEditor ? Colors.blueAccent : Colors.white),
-                             onPressed: _toggleEditor,
-                             tooltip: "Editar Imagem",
+                             icon: const Icon(Icons.tune, color: Colors.white),
+                             onPressed: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(builder: (_) => ImageEditorView(
+                                    paths: widget.paths,
+                                    initialIndex: _currentIndex,
+                                  ))
+                                ).then((_) => setState(() {})); // Refresh on return
+                             },
+                             tooltip: "Abrir Editor Completo",
                           ),
                         ],
                       ),
@@ -501,37 +510,7 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                 ),
                    // --- SCOPES LAYER ---
                    
-                   // 1. Histogram (Bottom Left)
-                   ScopeWidget(
-                      title: "Histograma",
-                      helpTitle: "Tutorial: Equilíbrio de Luz",
-                      helpContent: "O Histograma mostra a distribuição de luz.\n\nRÉGUA DE IMPRESSÃO (Margens de Segurança):\n- 0 e 255 (Vermelho): Limite Digital Absoluto (Preto/Branco Puro).\n- 5 a 250/252 (Amarelo): ZONA SEGURA DE IMPRESSÃO. Diferente dos monitores, impressoras de laboratório trabalham melhor neste intervalo. Evite ultrapassar 252 para garantir detalhes nas luzes e 5 para sombras.\n\nCOMO USAR:\n1. Mantenha a 'montanha' entre as marcas amarelas para segurança máxima na impressão.\n2. Use 'Exposição' e 'Contraste' para ajustar.",
-                      initialOffset: _histogramOffset,
-                      onDragEnd: (pos) => _histogramOffset = pos,
-                      child: HistogramWidget(
-                          imagePath: currentPath, 
-                          width: 250, 
-                          height: 120,
-                          editorState: editorState, // Real-time
-                          key: ValueKey('${currentPath}_Hist_${ref.watch(imageVersionProvider(currentPath))}'),
-                      ),
-                   ),
 
-
-                   // 3. Vectorscope (Bottom Right)
-                   ScopeWidget(
-                      title: "Vectorscope",
-                      helpTitle: "Tutorial: Cor de Pele Perfeita",
-                      helpContent: "O Vectorscope garante cores naturais.\n\nCOMO USAR:\n1. Saturação: Quanto mais longe do centro, mais viva a cor. O centro é preto e branco.\n2. SKIN LINE (Linha de Pele): Peles humanas REAIS, não importa a etnia (clara ou escura), SEMPRE ficam na linha entre Vermelho e Amarelo (aprox 10-11 horas no relógio).\n3. Se a pele estiver indo para o verde ou magenta, ajuste o 'Tint'.\n4. Se estiver espalhada demais, ajuste a Saturação.",
-                      initialOffset: _vectorscopeOffset,
-                      onDragEnd: (pos) => _vectorscopeOffset = pos,
-                      child: VectorscopeWidget(
-                          imagePath: currentPath, 
-                          size: 160,
-                          editorState: editorState, // Real-time
-                          key: ValueKey('${currentPath}_Vect_${ref.watch(imageVersionProvider(currentPath))}'),
-                      ),
-                   ),
 
                    // ... (Rest of children like HUD)
                  ],
@@ -609,24 +588,24 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                     const Divider(height: 24, color: Colors.white24),
                     
                     Expanded(
-                      child: ListView(
+                       child: ListView(
                         children: [
                            _buildSectionHeader("Luz"),
-                           _buildSlider("Exposição", editorState.exposure, -1.0, 1.0, notifier.updateExposure),
-                           _buildSlider("Contraste", editorState.contrast, 0.5, 2.0, notifier.updateContrast),
-                           _buildSlider("Brilho", editorState.brightness, 0.5, 1.5, notifier.updateBrightness),
+                           _buildSlider("Exposição", editorState.currentAdjustments.exposure, -1.0, 1.0, notifier.updateExposure),
+                           _buildSlider("Contraste", editorState.currentAdjustments.contrast, 0.5, 2.0, notifier.updateContrast),
+                           _buildSlider("Brilho", editorState.currentAdjustments.brightness, 0.5, 1.5, notifier.updateBrightness),
                            
                            _buildSectionHeader("Cor"),
-                           _buildSlider("Saturação", editorState.saturation, 0.0, 2.0, notifier.updateSaturation),
-                           _buildSlider("Temperatura", editorState.temperature, -1.0, 1.0, notifier.updateTemperature, 
+                           _buildSlider("Saturação", editorState.currentAdjustments.saturation, 0.0, 2.0, notifier.updateSaturation),
+                           _buildSlider("Temperatura", editorState.currentAdjustments.temperature, -1.0, 1.0, notifier.updateTemperature, 
                                colors: [Colors.blue, Colors.orange]),
-                           _buildSlider("Tint", editorState.tint, -1.0, 1.0, notifier.updateTint,
+                           _buildSlider("Tint", editorState.currentAdjustments.tint, -1.0, 1.0, notifier.updateTint,
                                colors: [Colors.green, Colors.purple]),
  
                            _buildSectionHeader("Detalhe"),
-                           _buildSlider("Nitidez", editorState.sharpness, 0.0, 1.0, notifier.updateSharpness),
-                           _buildSlider("Red. Ruído", editorState.noiseReduction, 0.0, 1.0, notifier.updateNoiseReduction),
-                           _buildSlider("Suavizar Pele", editorState.skinSmooth, 0.0, 1.0, notifier.updateSkinSmooth),
+                           _buildSlider("Nitidez", editorState.currentAdjustments.sharpness, 0.0, 1.0, notifier.updateSharpness),
+                           _buildSlider("Red. Ruído", editorState.currentAdjustments.noiseReduction, 0.0, 1.0, notifier.updateNoiseReduction),
+                           _buildSlider("Suavizar Pele", editorState.currentAdjustments.skinSmooth, 0.0, 1.0, notifier.updateSkinSmooth),
                         ],
                       ),
                     ),
@@ -639,12 +618,12 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                         onPressed: editorState.isProcessing ? null : () {
                            // Log Final User Changes before Save
                            print("\n--- FINAL USER/MANUAL ADJUSTMENTS ---");
-                           print("Exposure: ${editorState.exposure}");
-                           print("Contrast: ${editorState.contrast}");
-                           print("Brightness: ${editorState.brightness}");
-                           print("Saturation: ${editorState.saturation}");
-                           print("Temperature: ${editorState.temperature}");
-                           print("Tint: ${editorState.tint}");
+                           print("Exposure: ${editorState.currentAdjustments.exposure}");
+                           print("Contrast: ${editorState.currentAdjustments.contrast}");
+                           print("Brightness: ${editorState.currentAdjustments.brightness}");
+                           print("Saturation: ${editorState.currentAdjustments.saturation}");
+                           print("Temperature: ${editorState.currentAdjustments.temperature}");
+                           print("Tint: ${editorState.currentAdjustments.tint}");
                            print("-------------------------------------\n");
                            
                            _saveAdjustments(currentPath);

@@ -118,6 +118,7 @@ class AlbumPage {
   final int backgroundColor; // ARGB int
   final List<PhotoItem> photos;
   final int pageNumber;
+  final String? backgroundPath;
 
   AlbumPage({
     String? id,
@@ -126,23 +127,27 @@ class AlbumPage {
     this.backgroundColor = 0xFFFFFFFF, // White default
     this.pageNumber = 0,
     List<PhotoItem>? photos,
+    this.backgroundPath,
   })  : id = id ?? Uuid().v4(),
         photos = photos ?? [];
 
   AlbumPage copyWith({
+    String? id,
     double? widthMm,
     double? heightMm,
     int? backgroundColor,
     int? pageNumber,
     List<PhotoItem>? photos,
+    String? backgroundPath,
   }) {
     return AlbumPage(
-      id: id,
+      id: id ?? this.id,
       widthMm: widthMm ?? this.widthMm,
       heightMm: heightMm ?? this.heightMm,
       backgroundColor: backgroundColor ?? this.backgroundColor,
       pageNumber: pageNumber ?? this.pageNumber,
       photos: photos ?? this.photos.map((p) => p.copyWith()).toList(),
+      backgroundPath: backgroundPath ?? this.backgroundPath,
     );
   }
 
@@ -154,6 +159,7 @@ class AlbumPage {
       'backgroundColor': backgroundColor,
       'pageNumber': pageNumber,
       'photos': photos.map((p) => p.toJson()).toList(),
+      'backgroundPath': backgroundPath,
     };
   }
 
@@ -167,6 +173,7 @@ class AlbumPage {
       photos: (json['photos'] as List)
           .map((p) => PhotoItem.fromJson(p as Map<String, dynamic>))
           .toList(),
+      backgroundPath: json['backgroundPath'],
     );
   }
 }
@@ -180,6 +187,7 @@ class Project {
   final List<String> allImagePaths;
   final Map<String, int> imageRotations; // path -> degrees (0, 90, 180, 270)
   final int currentPageIndex;
+  final String? defaultBackgroundPath;
 
   Project({
     String? id,
@@ -190,12 +198,14 @@ class Project {
     List<String>? allImagePaths,
     Map<String, int>? imageRotations,
     this.currentPageIndex = 0,
+    this.defaultBackgroundPath,
   })  : id = id ?? Uuid().v4(),
         pages = pages ?? [],
         allImagePaths = allImagePaths ?? [],
         imageRotations = imageRotations ?? {};
 
   Project copyWith({
+    String? id,
     String? name,
     String? contractNumber,
     List<AlbumPage>? pages,
@@ -203,9 +213,10 @@ class Project {
     List<String>? allImagePaths,
     Map<String, int>? imageRotations,
     int? currentPageIndex,
+    String? defaultBackgroundPath,
   }) {
     return Project(
-      id: id,
+      id: id ?? this.id,
       name: name ?? this.name,
       contractNumber: contractNumber ?? this.contractNumber,
       pages: pages ?? this.pages, 
@@ -213,6 +224,7 @@ class Project {
       allImagePaths: allImagePaths ?? this.allImagePaths,
       imageRotations: imageRotations ?? this.imageRotations,
       currentPageIndex: currentPageIndex ?? this.currentPageIndex,
+      defaultBackgroundPath: defaultBackgroundPath ?? this.defaultBackgroundPath,
     );
   }
 
@@ -226,6 +238,7 @@ class Project {
       'allImagePaths': allImagePaths,
       'imageRotations': imageRotations,
       'currentPageIndex': currentPageIndex,
+      'defaultBackgroundPath': defaultBackgroundPath,
     };
   }
 
@@ -241,6 +254,7 @@ class Project {
       allImagePaths: List<String>.from(json['allImagePaths'] ?? []),
       imageRotations: Map<String, int>.from(json['imageRotations'] ?? {}),
       currentPageIndex: json['currentPageIndex'] as int? ?? 0,
+      defaultBackgroundPath: json['defaultBackgroundPath'],
     );
   }
 }

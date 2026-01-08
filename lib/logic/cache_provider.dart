@@ -8,7 +8,7 @@ import 'image_loader.dart';
 final imageVersionProvider = StateProvider.family<int, String>((ref, path) => 0);
 
 class CacheService {
-  static void invalidate(WidgetRef ref, String path) {
+  static void invalidate(dynamic ref, String path) {
     // 1. Evict from memory cache (ImageLoader)
     ImageLoader.evict(path);
     

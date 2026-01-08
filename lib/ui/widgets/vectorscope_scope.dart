@@ -51,12 +51,12 @@ class _VectorscopeWidgetState extends State<VectorscopeWidget> {
 
     final args = {
        'path': widget.imagePath,
-       'exposure': widget.editorState?.exposure ?? 0.0,
-       'contrast': widget.editorState?.contrast ?? 1.0,
-       'brightness': widget.editorState?.brightness ?? 1.0, 
-       'saturation': widget.editorState?.saturation ?? 1.0,
-       'temperature': widget.editorState?.temperature ?? 0.0,
-       'tint': widget.editorState?.tint ?? 0.0,
+       'exposure': widget.editorState?.currentAdjustments.exposure ?? 0.0,
+       'contrast': widget.editorState?.currentAdjustments.contrast ?? 1.0,
+       'brightness': widget.editorState?.currentAdjustments.brightness ?? 1.0, 
+       'saturation': widget.editorState?.currentAdjustments.saturation ?? 1.0,
+       'temperature': widget.editorState?.currentAdjustments.temperature ?? 0.0,
+       'tint': widget.editorState?.currentAdjustments.tint ?? 0.0,
     };
 
     try {

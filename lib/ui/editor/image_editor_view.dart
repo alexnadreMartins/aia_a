@@ -1,28 +1,75 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../logic/editor/editor_state.dart';
 import '../../logic/editor/color_matrix_helper.dart';
 import '../../logic/editor/gemini_service.dart';
+import 'package:image/image.dart' as img;
+import 'package:image/image.dart' as img;
+import 'dart:ui' as ui;
+import '../widgets/scope_widget.dart';
+import '../widgets/histogram_graph.dart';
+import '../widgets/vectorscope_scope.dart';
+import '../../logic/cache_provider.dart';
 
 class ImageEditorView extends ConsumerStatefulWidget {
-  final String imagePath;
-  const ImageEditorView({super.key, required this.imagePath});
+  final List<String> paths;
+  final int initialIndex;
+
+  const ImageEditorView({
+    super.key, 
+    required this.paths,
+    required this.initialIndex,
+  });
 
   @override
   ConsumerState<ImageEditorView> createState() => _ImageEditorViewState();
 }
 
 class _ImageEditorViewState extends ConsumerState<ImageEditorView> {
+  late ScrollController _timelineController;
+  late TransformationController _transformController;
+  Offset _histogramOffset = const Offset(20, 20); // Default positions relative to canvas
+  Offset _vectorscopeOffset = const Offset(20, 160);
   
   @override
   void initState() {
     super.initState();
-    // Reset state and set path on load
+    _timelineController = ScrollController();
+    _transformController = TransformationController();
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(imageEditorProvider.notifier).reset();
-      ref.read(imageEditorProvider.notifier).setPath(widget.imagePath);
+      ref.read(imageEditorProvider.notifier).setImages(widget.paths, widget.initialIndex);
+      // Initial Scroll
+      _scrollToIndex(widget.initialIndex);
     });
+  }
+
+  @override
+  void dispose() {
+    _timelineController.dispose();
+    _transformController.dispose();
+    super.dispose();
+  }
+
+  void _scrollToIndex(int index) {
+      if (!_timelineController.hasClients) return;
+      if (index < 0) return;
+      
+      const itemWidth = 80.0 + 8.0; // Width + Separator
+      final screenWidth = MediaQuery.of(context).size.width;
+      
+      // Center the item
+      final offset = (index * itemWidth) - (screenWidth / 2) + (itemWidth / 2);
+      
+      // Clamp not strictly needed as animateTo handles alignment, but good practice
+      _timelineController.animateTo(
+         offset, 
+         duration: const Duration(milliseconds: 300), 
+         curve: Curves.easeOutQuart
+      );
   }
 
   @override
@@ -30,140 +77,346 @@ class _ImageEditorViewState extends ConsumerState<ImageEditorView> {
     final state = ref.watch(imageEditorProvider);
     final notifier = ref.read(imageEditorProvider.notifier);
     
+    // Auto-Scroll Listener
+    ref.listen(imageEditorProvider.select((s) => s.currentIndex), (prev, next) {
+       if (prev != next) {
+          _scrollToIndex(next);
+       }
+    });
+
+    void zoomIn() {
+       final currentScale = _transformController.value.getMaxScaleOnAxis();
+       if (currentScale < 5.0) {
+           _transformController.value = Matrix4.identity()..scale(currentScale * 1.5);
+       }
+    }
+
+    void zoomOut() {
+       final currentScale = _transformController.value.getMaxScaleOnAxis();
+       if (currentScale > 0.1) {
+           _transformController.value = Matrix4.identity()..scale(currentScale / 1.5);
+       }
+    }
+    
+    final currentAdj = state.currentAdjustments;
+    final currentPath = state.currentPath;
+
     // Calculate Matrix
     final matrix = ColorMatrixHelper.getMatrix(
-       exposure: state.exposure,
-       contrast: state.contrast,
-       brightness: state.brightness,
-       saturation: state.saturation,
-       temperature: state.temperature,
-       tint: state.tint
+       exposure: currentAdj.exposure,
+       contrast: currentAdj.contrast,
+       brightness: currentAdj.brightness,
+       saturation: currentAdj.saturation,
+       temperature: currentAdj.temperature,
+       tint: currentAdj.tint
     );
+    
+    // Handle Compare Mode
+    final effectiveMatrix = state.showOriginal 
+        ? const ColorFilter.mode(Colors.transparent, BlendMode.dst) // No filter
+        : ColorFilter.matrix(matrix);
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF121212),
-      appBar: AppBar(
-        title: const Text("Editor Inteligente"),
-        backgroundColor: const Color(0xFF1E1E1E),
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: () => Navigator.pop(context),
-        ),
-        actions: [
-          TextButton.icon(
-             icon: const Icon(Icons.save, color: Colors.blueAccent),
-             label: const Text("Salvar", style: TextStyle(color: Colors.blueAccent)),
-             onPressed: () {
-                // TODO: Save Logic
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Salvando (Demo)...")));
-                Navigator.pop(context);
-             },
-          ),
-        ],
-      ),
-      body: Row(
-        children: [
-          // CANVA
-          Expanded(
-            child: InteractiveViewer(
-               maxScale: 5.0,
-               minScale: 0.1,
-               child: Center(
-                 child: ColorFiltered(
-                    colorFilter: ColorFilter.matrix(matrix),
-                    child: Image.file(File(widget.imagePath)),
-                 ),
-               ),
+    return CallbackShortcuts(
+      bindings: {
+          SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true): () {
+             notifier.syncAdjustments();
+             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ajustes Sincronizados!")));
+          },
+          SingleActivator(LogicalKeyboardKey.keyC, control: true): () {
+             notifier.copyAdjustments();
+             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ajustes Copiados!")));
+          },
+          SingleActivator(LogicalKeyboardKey.keyV, control: true): () {
+             notifier.pasteAdjustments();
+             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ajustes Colados!")));
+          },
+          SingleActivator(LogicalKeyboardKey.keyA, control: true, shift: true): () => _triggerAutoEnhance(notifier, context, state.currentPath),
+          const SingleActivator(LogicalKeyboardKey.arrowRight): () => notifier.selectImage(state.currentIndex + 1),
+          const SingleActivator(LogicalKeyboardKey.arrowLeft): () => notifier.selectImage(state.currentIndex - 1),
+          // Zoom Shortcuts
+          const SingleActivator(LogicalKeyboardKey.add): zoomIn,
+          const SingleActivator(LogicalKeyboardKey.equal): zoomIn,
+          const SingleActivator(LogicalKeyboardKey.minus): zoomOut,
+          const SingleActivator(LogicalKeyboardKey.numpadAdd): zoomIn,
+          const SingleActivator(LogicalKeyboardKey.numpadSubtract): zoomOut,
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          backgroundColor: const Color(0xFF121212),
+          appBar: AppBar(
+            title: Text("Editor Inteligente (${state.currentIndex + 1}/${state.imagePaths.length})"),
+            backgroundColor: const Color(0xFF1E1E1E),
+            leading: IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () => Navigator.pop(context),
             ),
-          ),
-          
-          // SIDEBAR
-          Container(
-             width: 320,
-             color: const Color(0xFF1E1E1E),
-             padding: const EdgeInsets.all(16),
-             child: Column(
-               children: [
-                 // Auto Magic
-                 SizedBox(
-                   width: double.infinity,
-                   child: ElevatedButton.icon(
-                     style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                     ),
-                     icon: state.isProcessing 
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) 
-                        : const Icon(Icons.auto_fix_high),
-                     label: Text(state.isProcessing ? "Analisando..." : "Auto AI Enhance"),
-
-
-                     onPressed: state.isProcessing ? null : () async {
-                        notifier.setProcessing(true);
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Gemini: Analisando imagem...")));
-                        
-                        try {
-                           final suggestions = await GeminiService.analyzeImage(widget.imagePath);
-                           if (suggestions.isNotEmpty && context.mounted) {
-                              notifier.applySuggestions(suggestions);
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ajustes Inteligentes Aplicados!")));
-                           } else if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Falha na análise.")));
-                           }
-                        } finally {
-                           notifier.setProcessing(false);
-                        }
-                     },
-                   ),
-                 ),
-                 
-                 const Divider(height: 32, color: Colors.white24),
-                 
-                 Expanded(
-                   child: ListView(
-                     children: [
-                        _buildSectionHeader("Luz"),
-                        _buildSlider("Exposição", state.exposure, -1.0, 1.0, notifier.updateExposure),
-                        _buildSlider("Contraste", state.contrast, 0.5, 2.0, notifier.updateContrast),
-                        _buildSlider("Brilho (Offset)", state.brightness, 0.5, 1.5, notifier.updateBrightness),
-                        
-                        _buildSectionHeader("Cor"),
-                        _buildSlider("Saturação", state.saturation, 0.0, 2.0, notifier.updateSaturation),
-                        _buildSlider("Temperatura", state.temperature, -1.0, 1.0, notifier.updateTemperature, 
-                            colors: [Colors.blue, Colors.orange]),
-                        _buildSlider("Tint", state.tint, -1.0, 1.0, notifier.updateTint,
-                            colors: [Colors.green, Colors.purple]),
-
-                        _buildSectionHeader("Detalhe (Lento)"),
-                        _buildSlider("Nitidez", state.sharpness, 0.0, 1.0, notifier.updateSharpness),
-                        _buildSlider("Red. Ruído", state.noiseReduction, 0.0, 1.0, notifier.updateNoiseReduction),
-                        _buildSlider("Suavizar Pele", state.skinSmooth, 0.0, 1.0, notifier.updateSkinSmooth),
-                     ],
-                   ),
-                 ),
-                 
-                 // Compare Button
-                 GestureDetector(
-                    onTapDown: (_) => notifier.toggleCompare(true),
-                    onTapUp: (_) => notifier.toggleCompare(false),
-                    onTapCancel: () => notifier.toggleCompare(false),
-                    child: Container(
-                       padding: const EdgeInsets.all(12),
-                       decoration: BoxDecoration(
-                          color: const Color(0xFF333333),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.white24),
-                       ),
-                       child: const Center(child: Text("Segure para Comparar", style: TextStyle(color: Colors.white70))),
+            actions: [
+               if (state.selectedPaths.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 16),
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.sync, color: Colors.orangeAccent),
+                      label: Text("Sincronizar (${state.selectedPaths.length})", 
+                        style: const TextStyle(color: Colors.orangeAccent)),
+                      onPressed: () {
+                         notifier.syncAdjustments();
+                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ajustes Sincronizados!")));
+                      },
                     ),
-                 ),
-               ],
-             ),
+                  ),
+
+              TextButton.icon(
+                 icon: const Icon(Icons.save, color: Colors.blueAccent),
+                 label: Text(state.selectedPaths.isNotEmpty ? "Salvar Seleção" : "Salvar Atual", style: const TextStyle(color: Colors.blueAccent)),
+                  onPressed: () {
+                     if (state.selectedPaths.isNotEmpty) {
+                        _saveAllSelected(notifier, context, state);
+                     } else {
+                        _saveImage(notifier, context, state.currentPath, state.currentAdjustments);
+                     }
+                  },
+               ),
+              const SizedBox(width: 8),
+              IconButton(icon: const Icon(Icons.zoom_out), onPressed: zoomOut, tooltip: "Zoom Out (-)"),
+              IconButton(icon: const Icon(Icons.zoom_in), onPressed: zoomIn, tooltip: "Zoom In (+)"),
+            ],
           ),
-        ],
+          body: Column(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    // CANVA
+                    Expanded(
+                      child: Stack(
+                        children: [
+                             // Image
+                             currentPath.isEmpty ? const Center(child: Text("Nenhuma imagem selecionada")) : InteractiveViewer(
+                                transformationController: _transformController,
+                                maxScale: 5.0,
+                                minScale: 0.1,
+                                child: Center(
+                                  child: ColorFiltered(
+                                      colorFilter: effectiveMatrix as ColorFilter,
+                                      child: Image.file(
+                                          File(currentPath), 
+                                          key: ValueKey('${currentPath}_${ref.watch(imageVersionProvider(currentPath))}')
+                                      ), // Force refresh
+                                  ),
+                                ),
+                             ),
+
+                             // SCOPES
+                             if (currentPath.isNotEmpty) ...[
+                               ScopeWidget(
+                                  title: "Histograma",
+                                  helpTitle: "Tutorial: Luz",
+                                  helpContent: "Mantenha a 'montanha' entre 5 e 252.",
+                                  initialOffset: _histogramOffset,
+                                  onDragEnd: (pos) => setState(() => _histogramOffset = pos),
+                                  child: HistogramWidget(
+                                      imagePath: currentPath, 
+                                      width: 250, 
+                                      height: 120,
+                                      editorState: state,
+                                      key: ValueKey('${currentPath}_Hist_${ref.watch(imageVersionProvider(currentPath))}'),
+                                  ),
+                               ),
+                               ScopeWidget(
+                                  title: "Vectorscope",
+                                  helpTitle: "Tutorial: Cor",
+                                  helpContent: "Pele na linha entre Vermelho e Amarelo.",
+                                  initialOffset: _vectorscopeOffset,
+                                  onDragEnd: (pos) => setState(() => _vectorscopeOffset = pos),
+                                  child: VectorscopeWidget(
+                                      imagePath: currentPath, 
+                                      size: 160,
+                                      editorState: state,
+                                      key: ValueKey('${currentPath}_Vect_${ref.watch(imageVersionProvider(currentPath))}'),
+                                  ),
+                               ),
+                             ]
+                        ],
+                      ),
+                    ),
+                    
+                    // SIDEBAR
+                    Container(
+                       width: 320,
+                       color: const Color(0xFF1E1E1E),
+                       padding: const EdgeInsets.all(16),
+                       child: Column(
+                         children: [
+                           // Auto Magic
+                           SizedBox(
+                             width: double.infinity,
+                             child: ElevatedButton.icon(
+                               style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.deepPurple,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(vertical: 16),
+                               ),
+                               icon: state.isProcessing 
+                                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) 
+                                  : const Icon(Icons.auto_fix_high),
+                               label: Text(state.isProcessing ? "Analisando..." : "Auto AI Enhance (Ctrl+Shift+A)"),
+                               onPressed: (state.isProcessing || currentPath.isEmpty) ? null : () => _triggerAutoEnhance(notifier, context, currentPath),
+                             ),
+                           ),
+                           
+                           const Divider(height: 32, color: Colors.white24),
+                           
+                           Expanded(
+                             child: ListView(
+                               children: [
+                                  _buildSectionHeader("Luz"),
+                                  _buildSlider("Exposição", currentAdj.exposure, -1.0, 1.0, notifier.updateExposure),
+                                  _buildSlider("Contraste", currentAdj.contrast, 0.5, 2.0, notifier.updateContrast),
+                                  _buildSlider("Brilho (Offset)", currentAdj.brightness, 0.5, 1.5, notifier.updateBrightness),
+                                  
+                                  _buildSectionHeader("Cor"),
+                                  _buildSlider("Saturação", currentAdj.saturation, 0.0, 2.0, notifier.updateSaturation),
+                                  _buildSlider("Temperatura", currentAdj.temperature, -1.0, 1.0, notifier.updateTemperature, 
+                                      colors: [Colors.blue, Colors.orange]),
+                                  _buildSlider("Tint", currentAdj.tint, -1.0, 1.0, notifier.updateTint,
+                                      colors: [Colors.green, Colors.purple]),
+
+                                  _buildSectionHeader("Detalhe (Lento)"),
+                                  _buildSlider("Nitidez", currentAdj.sharpness, 0.0, 1.0, notifier.updateSharpness),
+                                  _buildSlider("Red. Ruído", currentAdj.noiseReduction, 0.0, 1.0, notifier.updateNoiseReduction),
+                                  _buildSlider("Suavizar Pele", currentAdj.skinSmooth, 0.0, 1.0, notifier.updateSkinSmooth),
+                               ],
+                             ),
+                           ),
+                           
+                           // Compare Button
+                           GestureDetector(
+                              onTapDown: (_) => notifier.toggleCompare(true),
+                              onTapUp: (_) => notifier.toggleCompare(false),
+                              onTapCancel: () => notifier.toggleCompare(false),
+                              child: Container(
+                                 padding: const EdgeInsets.all(12),
+                                 decoration: BoxDecoration(
+                                    color: const Color(0xFF333333),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: Colors.white24),
+                                 ),
+                                 child: const Center(child: Text("Segure para Comparar", style: TextStyle(color: Colors.white70))),
+                              ),
+                           ),
+                         ],
+                       ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // TIMELINE
+              Container(
+                height: 120, // Increased for Scrollbar
+                color: const Color(0xFF101010),
+                padding: const EdgeInsets.only(top: 8, bottom: 4),
+                child: Scrollbar(
+                  controller: _timelineController,
+                  thumbVisibility: true,
+                  trackVisibility: true,
+                  thickness: 8,
+                  radius: const Radius.circular(4),
+                  child: ListView.separated(
+                    controller: _timelineController,
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    itemCount: state.imagePaths.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemBuilder: (context, index) {
+                     final path = state.imagePaths[index];
+                     final isSelected = index == state.currentIndex;
+                     final isMultiSelected = state.selectedPaths.contains(path);
+                     final hasAdjustments = state.allAdjustments.containsKey(path);
+                     
+                     return GestureDetector(
+                        onTap: () {
+                           final keys = HardwareKeyboard.instance.logicalKeysPressed;
+                           final isShift = keys.contains(LogicalKeyboardKey.shiftLeft) || keys.contains(LogicalKeyboardKey.shiftRight);
+                           
+                           if (isShift && state.currentIndex >= 0) {
+                               // Range Selection
+                               final start = state.currentIndex;
+                               final end = index;
+                               final low = start < end ? start : end;
+                               final high = start < end ? end : start;
+                               
+                               for (int i = low; i <= high; i++) {
+                                  notifier.toggleSelection(state.imagePaths[i], forceSelect: true);
+                               }
+                           } else {
+                               notifier.selectImage(index);
+                           }
+                        },
+                        onDoubleTap: () {
+                           // Exclusive Selection
+                           notifier.deselectAll();
+                           notifier.selectImage(index);
+                        },
+                        onLongPress: () {
+                           notifier.toggleSelection(path);
+                        },
+                        child: Container(
+                           width: 80,
+                           decoration: BoxDecoration(
+                              border: Border.all(
+                                color: isSelected ? Colors.amber : (isMultiSelected ? Colors.blueAccent : Colors.white12),
+                                width: isSelected ? 2 : (isMultiSelected ? 2 : 1),
+                              ),
+                              borderRadius: BorderRadius.circular(4),
+                           ),
+                           child: Stack(
+                             fit: StackFit.expand,
+                             children: [
+                               Image.file(File(path), fit: BoxFit.cover),
+                               if (hasAdjustments)
+                                  const Positioned(
+                                    top: 4, right: 4,
+                                    child: CircleAvatar(radius: 4, backgroundColor: Colors.greenAccent),
+                                  ),
+                               if (isMultiSelected)
+                                  Container(color: Colors.blueAccent.withOpacity(0.3)),
+                             ],
+                           ),
+                        ),
+                     );
+                  },
+                ),
+              ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
+  }
+
+  Future<void> _triggerAutoEnhance(ImageEditorNotifier notifier, BuildContext context, String path) async {
+      final state = ref.read(imageEditorProvider);
+      if (state.isProcessing) return;
+
+      notifier.setProcessing(true);
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Gemini: Analisando imagem...")));
+      
+      try {
+         final suggestions = await GeminiService.analyzeImage(path);
+         if (context.mounted) {
+             if (suggestions.isNotEmpty) {
+                 notifier.applySuggestions(suggestions);
+                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Ajustes Inteligentes Aplicados!")));
+             } else {
+                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Falha na análise.")));
+             }
+         }
+      } finally {
+         notifier.setProcessing(false);
+      }
   }
 
   Widget _buildSectionHeader(String title) {
@@ -207,5 +460,80 @@ class _ImageEditorViewState extends ConsumerState<ImageEditorView> {
          ),
        ],
      );
+  }
+  // --- SAVE LOGIC ---
+  Future<void> _saveImage(ImageEditorNotifier notifier, BuildContext context, String path, ImageAdjustments adj) async {
+      await _saveInternal(context, path, adj);
+      if (context.mounted) {
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Imagem Salva!")));
+         // Invalidate cache if needed or rely on Image.file key update
+         setState(() {}); 
+      }
+  }
+
+  Future<void> _saveAllSelected(ImageEditorNotifier notifier, BuildContext context, ImageEditorState state) async {
+       if (state.selectedPaths.isEmpty) return;
+       
+       notifier.setProcessing(true);
+       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Salvando ${state.selectedPaths.length} imagens...")));
+       
+       try {
+           int count = 0;
+           for (final path in state.selectedPaths) {
+               final adj = state.allAdjustments[path] ?? const ImageAdjustments();
+               await _saveInternal(context, path, adj);
+               count++;
+           }
+           if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("$count Imagens Salvas com Sucesso!")));
+       } finally {
+           notifier.setProcessing(false);
+       }
+  }
+
+  Future<void> _saveInternal(BuildContext context, String path, ImageAdjustments adj) async {
+       // Ideally run in compute
+       // For now logic is similar to BrowserFullScreenViewer
+       // Load -> Apply -> Save
+       print("Saving $path with exposure ${adj.exposure}");
+       
+       try {
+          final bytes = await File(path).readAsBytes();
+          var imgRaw = img.decodeImage(bytes);
+          if (imgRaw == null) return;
+                    // Apply Filters (Simplified for now, matching simple matrix mostly)
+           // MATRIX APPLICATION (WYSIWYS - What You See Is What You Save)
+           final matrix = ColorMatrixHelper.getMatrix(
+             exposure: adj.exposure,
+             contrast: adj.contrast,
+             brightness: adj.brightness,
+             saturation: adj.saturation,
+             temperature: adj.temperature,
+             tint: adj.tint
+           );
+           
+           print("DEBUG: Saving with Tint: ${adj.tint}, Temp: ${adj.temperature}");
+           print("DEBUG: Matrix Diagonal: RScale ${matrix[0]}, GScale ${matrix[6]}, BScale ${matrix[12]}");
+           
+           imgRaw = ColorMatrixHelper.applyColorMatrix(imgRaw, matrix);
+           
+           // Encode
+          
+          // Encode
+          final jpg = img.encodeJpg(imgRaw, quality: 90);
+          await File(path).writeAsBytes(jpg);
+          
+          // Force UI Refresh by evicting image cache
+          PaintingBinding.instance.imageCache.clear();
+          PaintingBinding.instance.imageCache.clearLiveImages();
+          
+          // RESET ADJUSTMENTS (As requested: "remove os ajustes pois imagem ja vai carregar tratada")
+          ref.read(imageEditorProvider.notifier).resetAdjustments(path);
+          
+          // Update Version to trigger Scopes Refresh
+          CacheService.invalidate(ref, path);
+       
+       } catch (e) {
+          print("Error Saving: $e");
+       }
   }
 }

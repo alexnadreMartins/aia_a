@@ -1,7 +1,11 @@
 import 'dart:ui';
 import 'package:uuid/uuid.dart';
 
-enum AssetType { element, template }
+enum AssetType {
+  element, 
+  template,
+  background, // Background pattern/image
+}
 
 class LibraryAsset {
   final String id;

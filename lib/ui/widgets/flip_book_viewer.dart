@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,15 +17,19 @@ class FlipBookViewer extends ConsumerStatefulWidget {
 
 class _FlipBookViewerState extends ConsumerState<FlipBookViewer> with SingleTickerProviderStateMixin {
   late AnimationController _controller;
-  late Animation<double> _animation;
   
-  int _currentIndex = 0; // Represents the index of the spread (0 = Cover, 1 = Pages 2-3, etc)
-  // Actually simpler: _currentIndex is the index of the LEFT page.
-  // If 0, Left is Empty (or Cover), Right is Page 0.
-  // If 1 (actually 2), Left is Page 1, Right is Page 2.
+  // Current "Left Page's Index" (The even number page on the left, 0=Cover-ish)
+  // Standard album layout:
+  // [Page i-1] [Page i]
+  // Ideally:
+  // Spread 0: [Empty] [Page 0]
+  // Spread 1: [Page 1] [Page 2]
+  // Spread 2: [Page 3] [Page 4]
+  int _currentSpreadIndex = 0; 
   
-  bool _isFlippingForward = true;
-
+  // 0 = Normal, 1 = Flipping Forward, -1 = Flipping Backward
+  int _flipDirection = 0; 
+  
   @override
   void initState() {
     super.initState();
@@ -31,10 +37,7 @@ class _FlipBookViewerState extends ConsumerState<FlipBookViewer> with SingleTick
        vsync: this, 
        duration: const Duration(milliseconds: 900)
     );
-    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
-    
-    // Auto-hide mouse?
-    // SystemChannels.textInput.invokeMethod('TextInput.hide');
+     // Start at beginning
   }
 
   @override
@@ -44,36 +47,49 @@ class _FlipBookViewerState extends ConsumerState<FlipBookViewer> with SingleTick
   }
 
   void _nextPage() {
-    if (_controller.isAnimating) return;
+    if (_controller.isAnimating || _flipDirection != 0) return;
     final project = ref.read(projectProvider).project;
-    if (_currentIndex + 2 >= project.pages.length + 1) return; // End
+    // Check if we have more pages
+    // Current spread shows (current*2 - 1) and (current*2)
+    // Next spread shows (current*2 + 1) and (current*2 + 2)
+    // Max index is length-1.
     
+    // Simplification: _currentSpreadIndex is the "pair index" 0, 1, 2...
+    // Pair 0: Left: -1, Right: 0
+    // Pair 1: Left: 1, Right: 2
+    // Pair 2: Left: 3, Right: 4
+    
+    int maxSpread = (project.pages.length / 2).ceil(); 
+    if (_currentSpreadIndex >= maxSpread) return;
+
     setState(() {
-      _isFlippingForward = true;
+      _flipDirection = 1;
     });
+    
     _controller.forward(from: 0.0).then((_) {
        setState(() {
-         _currentIndex += 2; // Advance spread
+         _currentSpreadIndex++;
+         _flipDirection = 0;
        });
        _controller.reset();
     });
   }
 
   void _prevPage() {
-    if (_controller.isAnimating) return;
-    if (_currentIndex - 2 < 0) return; // Start
-    
+    if (_controller.isAnimating || _flipDirection != 0) return;
+    if (_currentSpreadIndex <= 0) return;
+
     setState(() {
-      _isFlippingForward = false;
-      _currentIndex -= 2; // Move back logic is trickier with animation order
-      // Ideally: Start from "Flipped" state and reverse?
-      // Simplified: Just jump back and animate "Reverse Flip" (Left to Right)
+      _flipDirection = -1;
     });
     
-    // For reverse, we conceptually want to turn the LEFT page back to RIGHT.
-    // The animation logic below handles "Right to Left".
-    // Reverse needs "Left to Right".
-    _controller.forward(from: 0.0);
+    _controller.forward(from: 0.0).then((_) {
+       setState(() {
+         _currentSpreadIndex--;
+         _flipDirection = 0;
+       });
+       _controller.reset();
+    });
   }
 
   @override
@@ -81,9 +97,8 @@ class _FlipBookViewerState extends ConsumerState<FlipBookViewer> with SingleTick
     final project = ref.watch(projectProvider).project;
     final pages = project.pages;
     
-    // Calculate aspect ratio from first page or project settings
-    // Assuming A4 Landscape/Portrait mix? Usually albums are uniform.
-    double aspectRatio = 1.5; // Default 3:2
+    // Calc Aspect Ratio from first page
+    double aspectRatio = 1.5; 
     if (pages.isNotEmpty) {
        aspectRatio = pages[0].widthMm / pages[0].heightMm;
     }
@@ -92,7 +107,6 @@ class _FlipBookViewerState extends ConsumerState<FlipBookViewer> with SingleTick
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-           // Keyboard Listener
            CallbackShortcuts(
              bindings: {
                const SingleActivator(LogicalKeyboardKey.escape): () => Navigator.of(context).pop(),
@@ -103,178 +117,280 @@ class _FlipBookViewerState extends ConsumerState<FlipBookViewer> with SingleTick
                autofocus: true,
                child: Center(
                  child: AspectRatio(
-                   aspectRatio: aspectRatio * 2, // Double spread width
+                   aspectRatio: aspectRatio * 2, // Double spread
                    child: LayoutBuilder(
                       builder: (context, constraints) {
-                         final singlePageWidth = constraints.maxWidth / 2;
+                         final singleWidth = constraints.maxWidth / 2;
                          final height = constraints.maxHeight;
-                         
-                         // Determine current pages
-                         // Spread Index _currentIndex. 
-                         // Left Page: _currentIndex - 1 (if > -1)
-                         // Right Page: _currentIndex (if < length)
-                         
-                         // Wait, standard album:
-                         // 0: Cover (Right Side) ? Or Page 1 (Right Side)
-                         // Let's assume Page 0 is Layout Page 1.
-                         // Display:
-                         // Left: Page Index-1
-                         // Right: Page Index
-                         
-                         // Rendering Helpers
+
+                         // Helpers to get page indices for a Spread Index
+                         int getLeftIndex(int spread) {
+                             if (spread == 0) return -1; // Empty/Cover
+                             return (spread * 2) - 1;
+                         }
+                         int getRightIndex(int spread) {
+                             return (spread * 2);
+                         }
+
                          Widget buildPage(int index) {
                             if (index < 0 || index >= pages.length) {
-                               return Container(color: Colors.grey[900]); // Empty/Cover inner
+                               return Container(color: const Color(0xFF111111)); // Empty
                             }
                             final page = pages[index];
                             return Container(
                               color: Colors.white,
-                              child: CustomPaint(
-                                painter: PhotoPainter(
-                                  photos: page.photos,
-                                  backgroundColor: Colors.white, // or page.backgroundColor
-                                  gridSize: 0,
-                                  showGrid: false,
-                                  showMargins: false,
-                                  selectedId: null,
-                                  scale: 1.0, // Painter will auto-fit if we don't scale?
-                                              // PhotoPainter expects canvas size.
-                                ),
-                                size: Size(singlePageWidth, height),
+                              // Add subtle shadow/gradient for depth
+                              foregroundDecoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [Colors.black.withOpacity(0.05), Colors.transparent, Colors.black.withOpacity(0.02)],
+                                  stops: const [0, 0.1, 1],
+                                  begin: Alignment.centerRight, end: Alignment.centerLeft
+                                )
+                              ),
+                              child: LayoutBuilder(
+                                builder: (context, constraints) {
+                                  // Scale based on page dimensions (mm) vs available pixels
+                                  // Assuming page.widthMm matches singleWidth roughly in aspect ratio
+                                  final double scaleX = constraints.maxWidth / page.widthMm;
+                                  final double scaleY = constraints.maxHeight / page.heightMm;
+                                  
+                                  // Sort photos by Z-Index
+                                  final sortedPhotos = List<PhotoItem>.from(page.photos)
+                                     ..sort((a, b) => a.zIndex.compareTo(b.zIndex));
+                                     
+                                  return Stack(
+                                    children: [
+                                      if (page.backgroundPath != null && page.backgroundPath!.isNotEmpty)
+                                        Positioned.fill(
+                                          child: Image.file(
+                                            File(page.backgroundPath!),
+                                            fit: BoxFit.cover,
+                                          )
+                                        ),
+                                      ...sortedPhotos.map((photo) {
+                                         if (photo.isText && photo.text != null) {
+                                            return Positioned(
+                                              left: photo.x * scaleX,
+                                              top: photo.y * scaleY,
+                                              width: photo.width * scaleX,
+                                              height: photo.height * scaleY,
+                                              child: Text(
+                                                photo.text!,
+                                                style: TextStyle(
+                                                  fontSize: 12.0 * scaleX * 0.3,
+                                                  color: Colors.black,
+                                                ),
+                                              )
+                                            );
+                                         }
+                                         
+                                         return Positioned(
+                                           left: photo.x * scaleX,
+                                           top: photo.y * scaleY,
+                                           width: photo.width * scaleX,
+                                           height: photo.height * scaleY,
+                                           child: SinglePhotoRenderer(photo: photo),
+                                         );
+                                      }).toList(),
+                                    ],
+                                  );
+                                }
                               ),
                             );
                          }
 
-                         // Animation Logic
+                         // ... (rest of build/Animation code same)
+                         // Current Static State
+                         final currentLeftIdx = getLeftIndex(_currentSpreadIndex);
+                         final currentRightIdx = getRightIndex(_currentSpreadIndex);
+                         
                          return AnimatedBuilder(
-                           animation: _animation,
+                           animation: _controller,
                            builder: (context, child) {
-                              double angle = _animation.value * math.pi;
-                              
-                              // Visual State
-                              // Static Left: _currentIndex - 1 (Always visible, unless flipping backward covers it)
-                              // Static Right: _currentIndex + 2 (If flipping forward, this is revealed)
-                              // Flipper:
-                              // If Forward: Page at _currentIndex flips from Right to Left.
-                              // If Backward: Page at _currentIndex (which was on Left) flips Left to Right?
-                              
-                              // Simplified "One Page Flip" Widget logic is hard to inline.
-                              // Let's just create the visual stack.
-                              
-                              if (_isFlippingForward) {
-                                 // Flipping Page N (_currentIndex). 
-                                 // Front is Page N. Back is Page N+1.
-                                 // Base Left: Page N-1
-                                 // Base Right: Page N+2 (Revealed)
-                                 
-                                 // Actually simpler:
-                                 // Static Layer: Left (N-1), Right (N+1) ... (skipping N)
-                                 // Moving Layer: The Leaf.
-                                 
-                                 return Stack(
-                                   children: [
-                                      // Base Layer
-                                      Row(
-                                        children: [
-                                          SizedBox(width: singlePageWidth, child: buildPage(_currentIndex - 1)), // Static Left
-                                          SizedBox(width: singlePageWidth, child: buildPage(_currentIndex + 2)), // Static Right (Next-Next)
-                                        ],
+                              if (_flipDirection == 1) {
+                                 final nextSpread = _currentSpreadIndex + 1;
+                                 final nextLeft = getLeftIndex(nextSpread);
+                                 final nextRight = getRightIndex(nextSpread);
+                                 return Stack(children: [
+                                   Row(children: [
+                                      SizedBox(width: singleWidth, child: buildPage(currentLeftIdx)),
+                                      SizedBox(width: singleWidth, child: buildPage(nextRight)),
+                                   ]),
+                                   Positioned(
+                                      left: singleWidth, top: 0, bottom: 0,
+                                      child: PageTurnWidget(
+                                        amount: _controller.value, isRightPage: true,
+                                        front: buildPage(currentRightIdx), back: buildPage(nextLeft),
+                                        width: singleWidth, height: height,
                                       ),
-                                      
-                                      // The Flipper
-                                      // It's anchored at the center spine.
-                                      Positioned(
-                                        left: singlePageWidth, // Center spine
-                                        top: 0, bottom: 0,
-                                        child: Transform(
-                                          transform: Matrix4.identity()
-                                            ..setEntry(3, 2, 0.001) // Perspective
-                                            ..rotateY(-angle), // 0 to -180
-                                          alignment: Alignment.centerLeft, // Pivot at spine
-                                          child: Stack(
-                                            children: [
-                                              // Front Face (Visible 0 to 90 degrees)
-                                              if (angle < math.pi / 2)
-                                                SizedBox(width: singlePageWidth, height: height, child: buildPage(_currentIndex))
-                                              else
-                                              // Back Face (Visible 90 to 180 degrees)
-                                                Transform(
-                                                  alignment: Alignment.center,
-                                                  transform: Matrix4.identity()..rotateY(math.pi), // Mirror back
-                                                  child: SizedBox(width: singlePageWidth, height: height, child: buildPage(_currentIndex + 1)),
-                                                )
-                                            ],
-                                          ),
-                                        ),
-                                      )
-                                   ],
-                                 );
+                                   )
+                                 ]);
+                              } else if (_flipDirection == -1) {
+                                 final prevSpread = _currentSpreadIndex - 1;
+                                 final prevLeft = getLeftIndex(prevSpread);
+                                 final prevRight = getRightIndex(prevSpread);
+                                 return Stack(children: [
+                                   Row(children: [
+                                      SizedBox(width: singleWidth, child: buildPage(prevLeft)),
+                                      SizedBox(width: singleWidth, child: buildPage(currentRightIdx)),
+                                   ]),
+                                   Positioned(
+                                      left: 0, top: 0, bottom: 0,
+                                      child: PageTurnWidget(
+                                        amount: _controller.value, isRightPage: false,
+                                        front: buildPage(currentLeftIdx), back: buildPage(prevRight),
+                                        width: singleWidth, height: height,
+                                      ),
+                                   )
+                                 ]);
                               } else {
-                                 // Flipping Backward
-                                 // Moving Layer flips from Left to Right.
-                                 // Angle goes 0 to PI? Or we play reverse?
-                                 // We manually handle "Left to Right" logic here.
-                                 
-                                 // Static Layer: Left (N-3), Right (N)
-                                 // Flipper: Back is N-2, Front is N-1?
-                                 
-                                 // This is getting complex. 
-                                 // Let's stick to a robust package-like logic or just Forward flip for now?
-                                 // User wants navigation.
-                                 
-                                 // Re-calc indices for backward:
-                                 // Target state was _currentIndex (Left=N-1, Right=N).
-                                 // Previous state was Left=N-3, Right=N-2.
-                                 // We are transitioning TO that. 
-                                 
-                                 // Let's assume _currentIndex is ALREADY updated to the destination (N-2).
-                                 // Animation runs 0..1.
-                                 // We simulate flipping page N from Left to Right? 
-                                 // No, Page N+1 (which was on Left) flips back to Right.
-                                 
-                                 // Let's use a simpler trick: Only animate forward. 
-                                 // If "Back" pressed, just jump to prev state? No, looks bad.
-                                 
-                                 // FIX: Just use standard 3D flip transform.
-                                 // Left Page is pivot centerRight.
-                                 
-                                 return Stack(
-                                   children: [
-                                      // Base Layer
-                                      Row(
-                                        children: [
-                                          SizedBox(width: singlePageWidth, child: buildPage(_currentIndex - 1)), // Real Dest Left
-                                          SizedBox(width: singlePageWidth, child: buildPage(_currentIndex + 2)), // Real Dest Right? No.
-                                        ],
-                                      ),
-                                       // TODO: Reverse logic. 
-                                       // For MVP, simple crossfade if reverse is hard?
-                                       // User asked for "Visualização Flip".
-                                       // I will implement Forward only for now, Back button jumps?
-                                       // Or implement Reverse correctly.
-                                       Center(child: Text("Flipping..."))
-                                   ]
-                                 );
+                                 return Row(children: [
+                                   SizedBox(width: singleWidth, child: buildPage(currentLeftIdx)),
+                                   SizedBox(width: singleWidth, child: buildPage(currentRightIdx)),
+                                 ]);
                               }
-                           },
+                           }
                          );
-                      },
+                      }
                    ),
                  ),
                ),
              ),
            ),
-           
-           // Close Button
+           // HUD / Back
            Positioned(
-             top: 40, right: 40,
+             top: 20, right: 20,
              child: IconButton(
-               icon: const Icon(Icons.close, color: Colors.white, size: 30),
-               onPressed: () => Navigator.of(context).pop(),
-             ),
-           ),
+               icon: const Icon(Icons.close, color: Colors.white), 
+               onPressed: () => Navigator.pop(context),
+               tooltip: "Sair (ESC)",
+             )
+           )
         ],
-      ),
+      )
     );
+  }
+}
+
+class SinglePhotoRenderer extends StatefulWidget {
+  final PhotoItem photo;
+  const SinglePhotoRenderer({super.key, required this.photo});
+
+  @override
+  State<SinglePhotoRenderer> createState() => _SinglePhotoRendererState();
+}
+
+class _SinglePhotoRendererState extends State<SinglePhotoRenderer> {
+  ui.Image? _loadedImage;
+  
+  @override
+  void initState() {
+    super.initState();
+    _loadImage();
+  }
+
+  @override
+  void didUpdateWidget(covariant SinglePhotoRenderer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.photo.path != widget.photo.path) {
+       _loadImage();
+    }
+  }
+
+  Future<void> _loadImage() async {
+    if (widget.photo.path.isEmpty) return;
+    try {
+      final file = File(widget.photo.path);
+      if (!await file.exists()) return;
+      
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      if (mounted) {
+        setState(() {
+          _loadedImage = frame.image;
+        });
+      }
+    } catch (e) {
+      debugPrint("Error loading image for flip book: $e");
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loadedImage == null) {
+       return const SizedBox(); 
+    }
+    // Use the exact same painter as the editor to guarantee identical rendering (rotation, pan, zoom)
+    return CustomPaint(
+      painter: PhotoPainter(
+        image: _loadedImage,
+        photo: widget.photo,
+        isSelected: false,
+        isEditingContent: false,
+      ),
+      size: Size.infinite,
+    );
+  }
+}
+
+
+class PageTurnWidget extends StatelessWidget {
+  final double amount; // 0.0 to 1.0 progress
+  final bool isRightPage; // If true, flips Right->Left. If false, Left->Right.
+  final Widget front; // Visible when amount=0
+  final Widget back; // Visible when amount=1
+  final double width;
+  final double height;
+  
+  const PageTurnWidget({
+    super.key, 
+    required this.amount, 
+    required this.isRightPage,
+    required this.front,
+    required this.back,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+      // Angle:
+      // If RightPage: Rotate Y from 0 to -180 (-PI). 
+      // If LeftPage: Rotate Y from 0 to 180 (PI). 
+      
+      double angle = 0.0;
+      if (isRightPage) {
+         angle = -amount * math.pi;
+      } else {
+         angle = amount * math.pi;
+      }
+      
+      // Pivot
+      final Alignment alignment = isRightPage ? Alignment.centerLeft : Alignment.centerRight;
+      
+      return Transform(
+        transform: Matrix4.identity()
+          ..setEntry(3, 2, 0.001)
+          ..rotateY(angle),
+        alignment: alignment,
+        child: Stack(
+          children: [
+             // Front Face
+             // Visible if rotation is less than 90 degrees absolute
+             if (amount < 0.5) 
+                SizedBox(width: width, height: height, child: front),
+             
+             // Back Face
+             // Visible if rotation > 90
+             if (amount >= 0.5)
+               Transform(
+                 alignment: Alignment.center,
+                 transform: Matrix4.identity()..rotateY(math.pi), // Mirror content so it reads correctly
+                 child: SizedBox(width: width, height: height, child: back),
+               )
+          ]
+        ),
+      );
   }
 }

@@ -4,6 +4,9 @@ import 'widgets/full_screen_viewer.dart';
 import 'widgets/browser_full_screen_viewer.dart';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'widgets/flip_book_viewer.dart';
+import '../logic/auto_diagramming_service.dart';
+import 'widgets/diagram_progress_overlay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -183,6 +186,28 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
          const SingleActivator(LogicalKeyboardKey.arrowLeft): () => ref.read(projectProvider.notifier).previousPage(),
          const SingleActivator(LogicalKeyboardKey.arrowUp): () => ref.read(projectProvider.notifier).cycleAutoLayout(),
          const SingleActivator(LogicalKeyboardKey.arrowDown): () => ref.read(projectProvider.notifier).cycleAutoLayout(),
+
+         // Advanced Editing Shortcuts
+         const SingleActivator(LogicalKeyboardKey.comma, control: true): () => ref.read(projectProvider.notifier).sendToBack(ref.read(projectProvider).selectedPhotoId ?? ''),
+         const SingleActivator(LogicalKeyboardKey.period, control: true): () => ref.read(projectProvider.notifier).bringToFront(ref.read(projectProvider).selectedPhotoId ?? ''),
+         
+         const SingleActivator(LogicalKeyboardKey.keyZ, control: true): () => ref.read(projectProvider.notifier).undo(),
+         const SingleActivator(LogicalKeyboardKey.keyZ, control: true, shift: true): () => ref.read(projectProvider.notifier).redo(),
+         
+         const SingleActivator(LogicalKeyboardKey.enter, shift: true): () => ref.read(projectProvider.notifier).toggleEditMode(),
+         const SingleActivator(LogicalKeyboardKey.keyE, shift: true): () => _openSelectedInEditor(context, ref), // Open Editor
+         
+         // Pan Content (Ctrl + Arrow)
+         const SingleActivator(LogicalKeyboardKey.arrowRight, control: true): () => ref.read(projectProvider.notifier).panSelectedPhotoContent(0.1, 0),
+         const SingleActivator(LogicalKeyboardKey.arrowLeft, control: true): () => ref.read(projectProvider.notifier).panSelectedPhotoContent(-0.1, 0),
+         const SingleActivator(LogicalKeyboardKey.arrowUp, control: true): () => ref.read(projectProvider.notifier).panSelectedPhotoContent(0, -0.1),
+         const SingleActivator(LogicalKeyboardKey.arrowDown, control: true): () => ref.read(projectProvider.notifier).panSelectedPhotoContent(0, 0.1),
+
+         // Select Adjacent (Ctrl + Shift + Arrow)
+         const SingleActivator(LogicalKeyboardKey.arrowRight, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('right'),
+         const SingleActivator(LogicalKeyboardKey.arrowLeft, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('left'),
+         const SingleActivator(LogicalKeyboardKey.arrowUp, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('up'),
+         const SingleActivator(LogicalKeyboardKey.arrowDown, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('down'),
       },
       child: Focus(
         autofocus: true, 
@@ -268,6 +293,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                      ),
                    ),
                  ),
+                 
+                 const DiagramProgressOverlay(),
              ],
           ),
         ),
@@ -382,12 +409,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
             onSelected: (value) {
                if (value == 'batch_export') {
                   _showBatchExportDialog(context);
+               } else if (value == 'auto_diagram') {
+                  _showAutoDiagrammingDialog(context);
                } else if (value == 'generate_labels_endpoints') {
                   ref.read(projectProvider.notifier).generateLabels(allPages: false);
                } else if (value == 'generate_labels_all') {
                   ref.read(projectProvider.notifier).generateLabels(allPages: true);
                } else if (value == 'generate_labels_kit') {
                   ref.read(projectProvider.notifier).generateKitLabels();
+               } else if (value == 'sort_pages') {
+                  ref.read(projectProvider.notifier).sortPages();
                }
             },
             itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
@@ -401,6 +432,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    ],
                 ),
                ),
+               const PopupMenuItem<String>(
+                value: 'auto_diagram',
+                child: Row(
+                   children: [
+                      Icon(Icons.auto_stories, color: Colors.deepPurpleAccent),
+                      SizedBox(width: 8),
+                      Text('Diagramação Automática'),
+                   ],
+                ),
+               ),
                const PopupMenuDivider(),
                const PopupMenuItem<String>(
                  value: 'generate_labels_endpoints',
@@ -409,6 +450,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                      Icon(Icons.label_outline, color: Colors.blueGrey),
                      SizedBox(width: 8),
                      Text('Gerar Etiquetas (Primeira/Última)'),
+                   ],
+                 ),
+               ),
+               const PopupMenuItem<String>(
+                 value: 'sort_pages',
+                 child: Row(
+                   children: [
+                     Icon(Icons.sort, color: Colors.orange),
+                     SizedBox(width: 8),
+                     Text('Ordenar Páginas (Dia > Câmera)'),
                    ],
                  ),
                ),
@@ -433,6 +484,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                  ),
                ),
             ],
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+             icon: const Icon(Icons.menu_book, color: Colors.white70),
+             tooltip: "Visualização Flip Book (ESC para sair)",
+             onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (context) => const FlipBookViewer())
+                );
+             },
           ),
           const Spacer(),
           IconButton(
@@ -470,13 +531,14 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
               children: [
                 _buildDockTab("Fotos", 0),
                 _buildDockTab("Assets", 1),
+                _buildDockTab("Fundos", 2),
               ],
             ),
           ),
           Expanded(
             child: _leftDockIndex == 0 
               ? _buildFileBrowser(ref) 
-              : _buildAssetLibrary(ref),
+              : (_leftDockIndex == 1 ? _buildAssetLibrary(ref) : _buildBackgroundLibrary(ref)),
           ),
         ],
       ),
@@ -561,6 +623,70 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildBackgroundLibrary(WidgetRef ref) {
+    // Similar to AssetLibrary but focuses on 'Background' type assets
+    // Use a specific collection named "Fundos" or create it if missing
+    final assetState = ref.watch(assetProvider);
+    if (assetState.isLoading) return const Center(child: CircularProgressIndicator());
+
+    // Find or Create "Fundos" collection
+    // For now we just filter view to show collections. Ideally we have a single "Fundos" collection.
+    // Let's filter collections that contain "fundo" in name, or just show specific one?
+    // User wants "Import as I import templates". 
+    // So let's show all collections but maybe default to "Fundos".
+    
+    // Better: Show a dedicated view for "Fundos".
+    // If "Fundos" collection exists, show it expanded. If not, button to create.
+    
+    final fundosCollection = assetState.collections.firstWhere(
+       (c) => c.name.toLowerCase() == "fundos", 
+       orElse: () => AssetCollection(id: "", name: "") // Empty marker
+    );
+    
+    final hasFundos = fundosCollection.id.isNotEmpty;
+
+    return Column(
+      children: [
+         if (!hasFundos)
+           Padding(
+             padding: const EdgeInsets.all(8.0),
+             child: ElevatedButton.icon(
+               style: ElevatedButton.styleFrom(
+                 backgroundColor: const Color(0xFF1A1A1A),
+                 foregroundColor: Colors.white,
+               ),
+               onPressed: () {
+                  ref.read(assetProvider.notifier).addCollection("Fundos");
+               },
+               icon: const Icon(Icons.add),
+               label: const Text("Criar Coleção 'Fundos'"),
+             ),
+           )
+         else ...[
+             // Show Import Button specifically for Fundos
+             Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: ElevatedButton.icon(
+                   style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1A1A1A),
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size(double.infinity, 36),
+                   ),
+                   onPressed: () => _importAssetsToCollection(ref, fundosCollection.id, type: AssetType.background), // FORCE TYPE BACKGROUND
+                   icon: const Icon(Icons.add_photo_alternate),
+                   label: const Text("Importar Fundos"),
+                ),
+             ),
+             Expanded(
+               child: SingleChildScrollView(
+                 child: _buildAssetCollection(context, ref, fundosCollection),
+               ),
+             ),
+         ]
+      ],
     );
   }
 
@@ -716,7 +842,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     );
   }
 
-  Future<void> _importAssetsToCollection(WidgetRef ref, String collectionId) async {
+  Future<void> _importAssetsToCollection(WidgetRef ref, String collectionId, {AssetType? type}) async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
       type: FileType.custom,
@@ -725,6 +851,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     if (result == null) return;
 
     final paths = result.paths.whereType<String>().toList();
+
+    if (type != null) {
+       await ref.read(assetProvider.notifier).addAssetsToCollection(collectionId, paths, type);
+       return;
+    }
     
     if (mounted) {
       showDialog(
@@ -753,6 +884,14 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
               },
               child: const Text("Templates (Molduras)"),
             ),
+             ElevatedButton(
+               style: ElevatedButton.styleFrom(backgroundColor: Colors.purple[800]),
+               onPressed: () {
+                 ref.read(assetProvider.notifier).addAssetsToCollection(collectionId, paths, AssetType.background);
+                 Navigator.pop(ctx);
+               },
+               child: const Text("Fundos"),
+             ),
           ],
         ),
       );
@@ -929,14 +1068,13 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    _buildToolIcon(Icons.access_time, "Data", 
                       state.browserSortType == BrowserSortType.date,
                       () => notifier.setBrowserSortType(BrowserSortType.date)),
-                   _buildToolIcon(Icons.check_circle, "Sel.", 
-                      state.browserSortType == BrowserSortType.selected,
-                      () => notifier.setBrowserSortType(BrowserSortType.selected)),
                    
-                   const SizedBox(width: 16),
-                   TextButton(
+                   const SizedBox(width: 8),
+                   TextButton.icon(
+                      icon: const Icon(Icons.auto_awesome, size: 14, color: Colors.amberAccent),
+                      label: const Text("AutoSelect", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
                       onPressed: () => _handleAutoSelect(context, notifier),
-                      child: const Text("AutoSelec", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
+                      style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8)),
                    ),
                  ],
                ),
@@ -1230,6 +1368,13 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                               child: Stack(
                                 clipBehavior: Clip.none,
                                 children: [
+                                  if (currentPage.backgroundPath != null && currentPage.backgroundPath!.isNotEmpty)
+                                     Positioned.fill(
+                                        child: Image.file(
+                                           File(currentPage.backgroundPath!),
+                                           fit: BoxFit.cover,
+                                        )
+                                     ),
                                   ...currentPage.photos.map((photo) => _buildPhotoWidget(ref, photo, state.selectedPhotoId == photo.id, key: ValueKey(photo.id))),
                                 ],
                               ),
@@ -1357,30 +1502,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       color: const Color(0xFF262626),
       items: <PopupMenuEntry<dynamic>>[
         PopupMenuItem(
-          child: const ListTile(leading: Icon(Icons.edit, color: Colors.blueAccent, size: 18), title: Text("Abrir no Editor", style: TextStyle(color: Colors.white))),
-          onTap: () {
-            // Navigate to BrowserFullScreenViewer with ALL photos (context aware)
-             final paths = ref.read(projectProvider).project.pages
-                 .expand((p) => p.photos)
-                 .where((p) => !p.isText && p.path.isNotEmpty)
-                 .map((p) => p.path)
-                 .toSet() // Unique paths
-                 .toList();
-             
-             final initialIndex = paths.indexOf(photo.path);
-             
-             if (initialIndex != -1) {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => BrowserFullScreenViewer(
-                      paths: paths,
-                      initialIndex: initialIndex,
-                    ),
-                  ),
-                );
-             }
-          },
+          child: const ListTile(leading: Icon(Icons.edit, color: Colors.blueAccent, size: 18), title: Text("Abrir no Editor (Shift+E)", style: TextStyle(color: Colors.white))),
+          onTap: () => _openSelectedInEditor(context, ref, photo),
         ),
         const PopupMenuDivider(),
         PopupMenuItem(
@@ -1397,6 +1520,26 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         ),
         const PopupMenuDivider(),
         PopupMenuItem(
+          child: const ListTile(leading: Icon(Icons.wallpaper, color: Colors.white, size: 18), title: Text("Definir como Fundo", style: TextStyle(color: Colors.white))),
+          onTap: () {
+             Future.delayed(Duration.zero, () async {
+                 final result = await showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+                    title: const Text("Definir Fundo"),
+                    content: const Text("Deseja aplicar este fundo apenas nesta página ou em todas do projeto?"),
+                    actions: [
+                       TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text("Cancelar")),
+                       TextButton(onPressed: () => Navigator.pop(ctx, 'single'), child: const Text("Apenas Nesta")),
+                       ElevatedButton(onPressed: () => Navigator.pop(ctx, 'all'), child: const Text("Em Todas")),
+                    ],
+                 ));
+                 
+                 if (result != null) {
+                    await ref.read(projectProvider.notifier).setBackground(photo.path, applyToAll: result == 'all');
+                 }
+             });
+          },
+        ),
+        PopupMenuItem(
           child: const ListTile(leading: Icon(Icons.vertical_align_top, color: Colors.white, size: 18), title: Text("Trazer para Frente", style: TextStyle(color: Colors.white))),
           onTap: () => ref.read(projectProvider.notifier).bringToFront(photo.id),
         ),
@@ -1406,6 +1549,45 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         ),
       ],
     );
+  }
+
+  void _openSelectedInEditor(BuildContext context, WidgetRef ref, [PhotoItem? photo]) {
+     PhotoItem? targetPhoto = photo;
+     
+     // If not provided (e.g. shortcut), try to find selected
+     if (targetPhoto == null) {
+        final state = ref.read(projectProvider);
+        if (state.selectedPhotoId != null && state.project.currentPageIndex >= 0) {
+           final page = state.project.pages[state.project.currentPageIndex];
+           try {
+             targetPhoto = page.photos.firstWhere((p) => p.id == state.selectedPhotoId);
+           } catch (_) {}
+        }
+     }
+
+     if (targetPhoto == null || targetPhoto.path.isEmpty) return;
+
+     // Navigate logic reuse
+     final paths = ref.read(projectProvider).project.pages
+         .expand((p) => p.photos)
+         .where((p) => !p.isText && p.path.isNotEmpty)
+         .map((p) => p.path)
+         .toSet()
+         .toList();
+     
+     final initialIndex = paths.indexOf(targetPhoto.path);
+     
+     if (initialIndex != -1) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ImageEditorView(
+              paths: paths, 
+              initialIndex: initialIndex
+            )
+          )
+        );
+     }
   }
 
   void _showPageContextMenu(BuildContext context, WidgetRef ref, Offset localPos) {
@@ -1850,6 +2032,61 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     );
   }
 
+  // --- Auto Diagramming Logic ---
+
+  Future<void> _showAutoDiagrammingDialog(BuildContext context) async {
+      // 1. Select Model Project
+      FilePickerResult? modelResult = await FilePicker.platform.pickFiles(
+         dialogTitle: "Selecione o PROJETO MODELO (.alem)",
+         type: FileType.custom,
+         allowedExtensions: ['alem'],
+      );
+      if (modelResult == null) return;
+      final modelPath = modelResult.files.single.path!;
+
+      // 2. Select Root Folder
+      String? rootPath = await FilePicker.platform.getDirectoryPath(
+         dialogTitle: "Selecione a PASTA PAI dos Alunos",
+      );
+      if (rootPath == null) return;
+
+      // 3. Input Contract Number
+      final contractCtrl = TextEditingController();
+      final confirm = await showDialog<bool>(
+         context: context,
+         builder: (ctx) => AlertDialog(
+            title: const Text("Diagramação Automática"),
+            content: Column(
+               mainAxisSize: MainAxisSize.min,
+               children: [
+                  const Text("Modelo selecionado e Pasta Pai definida.\nInsira o número de contrato padrão:"),
+                  const SizedBox(height: 16),
+                  TextField(
+                     controller: contractCtrl,
+                     decoration: const InputDecoration(labelText: "Contrato (ex: 1234)"),
+                  )
+               ],
+            ),
+            actions: [
+               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancelar")),
+               ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("INICIAR")),
+            ],
+         )
+      );
+
+      if (confirm == true) {
+         try {
+            AutoDiagrammingService().startDiagramming(
+               modelProjectPath: modelPath,
+               rootFolderPath: rootPath,
+               contractNumber: contractCtrl.text.trim(),
+            );
+         } catch (e) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erro ao iniciar: $e")));
+         }
+      }
+  }
+
   // --- Batch Export Logic ---
 
   Future<void> _showBatchExportDialog(BuildContext context) async {
@@ -2096,19 +2333,84 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       }
     }
     if (!handled) {
-      for (final path in paths) {
-        if(_isImage(path)) {
-           final item = PhotoItem(
-              path: path, 
-              x: dropPos.dx - 50, 
-              y: dropPos.dy - 50, 
-              width: 100, 
-              height: 100
-           );
-           ref.read(projectProvider.notifier).addPhotoToCurrentPage(item);
-        }
-      }
+       // Filter valid images
+       final validPaths = paths.where((p) => _isImage(p)).toList();
+       if (validPaths.isEmpty) return;
+
+       // Ask User: Photos or Background?
+       showDialog(
+         context: context,
+         builder: (ctx) => AlertDialog(
+           title: const Text("Importar Imagens"),
+           content: Text("Você soltou ${validPaths.length} arquivo(s). Como deseja adicioná-los?"),
+           actions: [
+             TextButton(
+               onPressed: () { 
+                 Navigator.pop(ctx); // Cancel
+               },
+               child: const Text("Cancelar"),
+             ),
+             TextButton(
+               onPressed: () {
+                 Navigator.pop(ctx);
+                 // Add as Photos
+                 for (final path in validPaths) {
+                    final item = PhotoItem(
+                       id: Uuid().v4(),
+                       path: path, 
+                       x: dropPos.dx - 50, 
+                       y: dropPos.dy - 50, 
+                       width: 100, 
+                       height: 100
+                    );
+                    ref.read(projectProvider.notifier).addPhotoToCurrentPage(item);
+                 }
+               }, 
+               child: const Text("Adicionar como Fotos"),
+             ),
+             ElevatedButton(
+               onPressed: () {
+                 Navigator.pop(ctx);
+                 // Proceed to set Background (using first image if multiple, or ask? Usually background is single)
+                 // If multiple, we just use the first one for now or loop? Background is 1 per page.
+                 // Let's use the first one.
+                 if (validPaths.isNotEmpty) {
+                    _promptForBackgroundScope(ref, validPaths.first);
+                 }
+               },
+               child: const Text("Definir como Fundo"),
+             ),
+           ],
+         )
+       );
     }
+  }
+
+  void _promptForBackgroundScope(WidgetRef ref, String path) {
+     showDialog(
+       context: context,
+       builder: (ctx) => AlertDialog(
+          title: const Text("Definir Fundo"),
+          content: const Text("Deseja aplicar este fundo apenas nesta página ou em todas do projeto?"),
+          actions: [
+             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+             TextButton(
+               onPressed: () async {
+                  Navigator.pop(ctx);
+                  await ref.read(projectProvider.notifier).setBackground(path, applyToAll: false);
+               }, 
+               child: const Text("Apenas Nesta")
+             ),
+             ElevatedButton(
+               onPressed: () async {
+                  Navigator.pop(ctx);
+                  await ref.read(projectProvider.notifier).setBackground(path, applyToAll: true);
+               },
+               child: const Text("Em Todas")
+             ),
+          ],
+       )
+     );
   }
 
   void _handleAssetDrop(WidgetRef ref, Offset dropPos, LibraryAsset asset, AlbumPage currentPage) {

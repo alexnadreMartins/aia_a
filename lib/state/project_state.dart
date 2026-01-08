@@ -12,6 +12,9 @@ import '../logic/layout_engine.dart';
 import '../models/asset_model.dart';
 
 import '../logic/auto_select_engine.dart';
+import 'package:image/image.dart' as img; // For Rotation
+import '../logic/cache_provider.dart'; // For Cache Utils
+import 'package:path/path.dart' as p;
 
 
 
@@ -105,6 +108,7 @@ class PhotoBookState {
 
 // --- Notifier with Undo/Redo Logic ---
 class ProjectNotifier extends StateNotifier<PhotoBookState> {
+  final Ref ref; // Inject Ref
   // ...
   
   void setEditingContent(bool isEditing) {
@@ -130,13 +134,13 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   final List<Project> _redoStack = [];
   static const int _maxHistory = 50;
 
-  ProjectNotifier()
+  ProjectNotifier(this.ref)
       : super(PhotoBookState(
           project: Project(pages: [_createDefaultPage()]),
         ));
 
-  static AlbumPage _createDefaultPage({double widthMm = 210, double heightMm = 297}) {
-    return AlbumPage(widthMm: widthMm, heightMm: heightMm); 
+  static AlbumPage _createDefaultPage({double widthMm = 210, double heightMm = 297, String? backgroundPath}) {
+    return AlbumPage(widthMm: widthMm, heightMm: heightMm, backgroundPath: backgroundPath); 
   }
 
   void _saveStateToHistory() {
@@ -202,31 +206,78 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     setCanvasScale(state.canvasScale + delta);
   }
 
-  void rotateSelectedGalleryPhotos(int degrees) {
+  Future<void> rotateSelectedGalleryPhotos(int degrees) async {
     if (state.selectedBrowserPaths.isEmpty) return;
     
-    _saveStateToHistory();
-    final newRotations = Map<String, int>.from(state.project.imageRotations);
+    // Optimistic Logic? No, user wants file persistence.
+    // We will process files then update state to force reload.
+    // This might be slow for many photos, but it's safe.
     
-    for (var path in state.selectedBrowserPaths) {
-      final current = newRotations[path] ?? 0;
-      newRotations[path] = (current + degrees) % 360;
+    final paths = state.selectedBrowserPaths.toList();
+    
+    // Show some global loading indicator? 
+    // Ideally we'd use a separate state for 'processing', but for now we await.
+    
+    for (var path in paths) {
+      await _rotateFile(path, degrees);
     }
+    
+    // Force Re-read of state? Or just update rotations map (reset to 0)
+    final newRotations = Map<String, int>.from(state.project.imageRotations);
+    for (var path in paths) {
+       newRotations[path] = 0; // Reset visual rotation since file is rotated
+    }
+
+    state = state.copyWith(
+      project: state.project.copyWith(imageRotations: newRotations)
+    );
+  }
+
+  Future<void> rotateGalleryPhoto(String path, int degrees) async {
+    await _rotateFile(path, degrees);
+    
+    final newRotations = Map<String, int>.from(state.project.imageRotations);
+    newRotations[path] = 0; // Reset visual rotation
     
     state = state.copyWith(
       project: state.project.copyWith(imageRotations: newRotations)
     );
   }
 
-  void rotateGalleryPhoto(String path, int degrees) {
-    _saveStateToHistory();
-    final newRotations = Map<String, int>.from(state.project.imageRotations);
-    final current = newRotations[path] ?? 0;
-    newRotations[path] = (current + degrees) % 360;
-    
-    state = state.copyWith(
-      project: state.project.copyWith(imageRotations: newRotations)
-    );
+  Future<void> _rotateFile(String path, int degrees) async {
+      try {
+        final file = File(path);
+        if (!await file.exists()) return;
+        
+        final bytes = await file.readAsBytes();
+        final image = img.decodeImage(bytes);
+        if (image == null) return;
+        
+        // img.copyRotate uses clockwise degrees?
+        // Note: Project uses standard degrees (90, -90).
+        // image package handles rotation.
+        
+        final rotated = img.copyRotate(image, angle: degrees);
+        
+        // Encode back to original format (assuming JPG for photos)
+        // If PNG, we should check extension.
+        List<int> newBytes;
+        if (path.toLowerCase().endsWith(".png")) {
+           newBytes = img.encodePng(rotated);
+        } else {
+           newBytes = img.encodeJpg(rotated, quality: 95); // High quality
+        }
+        
+        await file.writeAsBytes(newBytes, flush: true);
+        
+        // Invalidate Cache
+        // Using explicit specific method if available or Ref
+        ref.read(imageVersionProvider(path).notifier).state++;
+        CacheService.invalidate(ref, path); // Use helper
+        
+      } catch (e) {
+        debugPrint("Error rotating file $path: $e");
+      }
   }
 
   void toggleBrowserPathSelection(String path) {
@@ -346,15 +397,13 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
 
   // Last Auto Layout Logic
   Future<void> applyAutoLayout(List<String> paths) async {
-  // ... (existing code, not replacing, just ensuring these new methods are appended correctly)
     if (paths.isEmpty || state.isProcessing) return;
     
     state = state.copyWith(isProcessing: true);
     _saveStateToHistory();
 
     try {
-      debugPrint("Starting Advanced Smart Flow for ${paths.length} photos...");
-      
+      debugPrint("Starting Restored Smart Flow for ${paths.length} photos...");
       
       // 1. Prepare Assets with Dimensions
       List<LibraryAsset> assets = [];
@@ -364,6 +413,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
           int h = 0;
           try { 
               date = await File(p).lastModified();
+              // Try fast meta read
               final bytes = await File(p).readAsBytes();
               final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
               final descriptor = await ui.ImageDescriptor.encoded(buffer);
@@ -379,61 +429,225 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
               path: p, 
               name: p.split(Platform.pathSeparator).last,
               fileDate: date,
-              width: w,
-              height: h
+              width: w == 0 ? 1000 : w,
+              height: h == 0 ? 1000 : h
           ));
       }
 
-      // 2. Run SmartFlow
-      // Determine orientation
-      bool isHorizontal = true; 
-      if (state.project.pages.isNotEmpty) {
-          isHorizontal = state.project.pages[0].widthMm >= state.project.pages[0].heightMm;
-      }
+      // 2. Sort by Date
+      assets.sort((a, b) {
+         if (a.fileDate == null || b.fileDate == null) return 0;
+         return a.fileDate!.compareTo(b.fileDate!);
+      });
 
-      // Delegate to SmartFlow Engine
-      final pagesFlow = await SmartFlow.generateFlow(
-        assets,
-        isProjectHorizontal: isHorizontal,
-      );
-      
-      // 3. Generate Pages
+      // 3. Logic Implementation
+      List<LibraryAsset> remaining = List.from(assets);
       List<AlbumPage> newPages = [];
-      double pW = 305;
-      double pH = 215;
-      if (state.project.pages.isNotEmpty) {
-          pW = state.project.pages[0].widthMm;
-          pH = state.project.pages[0].heightMm;
+      
+      final double pW = state.project.pages.isNotEmpty ? state.project.pages[0].widthMm : 305;
+      final double pH = state.project.pages.isNotEmpty ? state.project.pages[0].heightMm : 215;
+
+      // Helper to classify
+      bool isVert(LibraryAsset a) => (a.height ?? 0) > (a.width ?? 0);
+
+      // A. Global Cover (First Vertical)
+      LibraryAsset? coverPhoto;
+      final firstVIndex = remaining.indexWhere((a) => isVert(a));
+      if (firstVIndex != -1) {
+         coverPhoto = remaining.removeAt(firstVIndex);
       }
 
-      for (var pageAssets in pagesFlow) {
-          final pageId = Uuid().v4();
-          List<PhotoItem> photos = [];
-          
-          if (pageAssets.length == 1) {
-               photos.add(PhotoItem(
-                   id: Uuid().v4(),
-                   path: pageAssets[0].path,
-                   x: 0, y: 0, width: pW, height: pH
-               ));
-          } else if (pageAssets.length >= 2) { 
-               if (isHorizontal) {
-                   // Side by side
-                   double w = pW / 2;
-                   photos.add(PhotoItem(id: Uuid().v4(), path: pageAssets[0].path, x: 0, y: 0, width: w, height: pH));
-                   photos.add(PhotoItem(id: Uuid().v4(), path: pageAssets[1].path, x: w, y: 0, width: w, height: pH));
-               } else {
-                   // Top Bottom
-                   double h = pH / 2;
-                   photos.add(PhotoItem(id: Uuid().v4(), path: pageAssets[0].path, x: 0, y: 0, width: pW, height: h));
-                   photos.add(PhotoItem(id: Uuid().v4(), path: pageAssets[1].path, x: 0, y: h, width: pW, height: h));
-               }
+      // B. Global Back Cover (Last Vertical)
+      LibraryAsset? backCoverPhoto;
+      final lastVIndex = remaining.lastIndexWhere((a) => isVert(a));
+      if (lastVIndex != -1) {
+         backCoverPhoto = remaining.removeAt(lastVIndex);
+      }
+
+      // C. Generate Pages
+      
+      // C1. Page 1: Cover
+      if (coverPhoto != null) {
+          final pagePhotos = TemplateSystem.applyTemplate(
+             '1_vertical_half_right', 
+             [PhotoItem(id: Uuid().v4(), path: coverPhoto.path, width: pW, height: pH)], 
+             pW, pH
+          );
+          newPages.add(AlbumPage(id: Uuid().v4(), widthMm: pW, heightMm: pH, photos: pagePhotos, pageNumber: 0));
+      }
+
+      // C2. Day Processing
+      // Group by Day (YYYY-MM-DD)
+      Map<String, List<LibraryAsset>> dayGroups = {};
+      for (var asset in remaining) {
+         final date = asset.fileDate ?? DateTime.now();
+         final key = "${date.year}-${date.month}-${date.day}";
+         dayGroups.putIfAbsent(key, () => []).add(asset);
+      }
+      
+      final sortedDays = dayGroups.keys.toList()..sort();
+      
+      // Identify if Day 1 is the SAME day as the Cover Photo?
+      // User said: "primeira pagina... depois criava a cada dia com a primeira foto do dia vertical".
+      // Usually the Cover matches the First Day. So we might SKIP the "Day Start" logic for the First Day 
+      // if we assume the Cover *is* the opening for Day 1.
+      // However, if Day 1 has *many* photos, maybe a section divider is wanted?
+      // Logic: "depois criava a cada dia". "After, create for each day".
+      // This implies 2nd day onwards needs opening.
+      // Or First Day also needs opening if it wasn't the cover?
+      // Let's assume: If Cover exists, it counts as Day 1 opener.
+      // So for Day 1, we just process Content.
+      // For Day 2+, we look for an Opener.
+      
+      String? coverDayKey;
+      if (coverPhoto != null && coverPhoto.fileDate != null) {
+         final d = coverPhoto.fileDate!;
+         coverDayKey = "${d.year}-${d.month}-${d.day}";
+      }
+
+      for (var dayKey in sortedDays) {
+          final daysPhotos = dayGroups[dayKey]!;
+          if (daysPhotos.isEmpty) continue;
+
+          // Day Opener Check
+          bool needsOpener = true;
+          if (dayKey == coverDayKey && coverPhoto != null) {
+             needsOpener = false; // Cover already opened this day
           }
           
-          newPages.add(AlbumPage(id: pageId, widthMm: pW, heightMm: pH, photos: photos, pageNumber: 0));
+          if (needsOpener) {
+             // Find First Vertical of this Day
+             final dayVIndex = daysPhotos.indexWhere((a) => isVert(a));
+             if (dayVIndex != -1) {
+                 final opener = daysPhotos.removeAt(dayVIndex);
+                 final pagePhotos = TemplateSystem.applyTemplate(
+                    '1_vertical_half_right', 
+                    [PhotoItem(id: Uuid().v4(), path: opener.path, width: pW, height: pH)], 
+                    pW, pH
+                 );
+                 newPages.add(AlbumPage(id: Uuid().v4(), widthMm: pW, heightMm: pH, photos: pagePhotos, pageNumber: 0));
+             }
+          }
+          
+          // Day Content Layout
+          // Loop through remaining photos
+          // We need to look ahead for Pairs
+          int i = 0;
+          while (i < daysPhotos.length) {
+             final current = daysPhotos[i];
+             
+             if (isVert(current)) {
+                // Try to find next Vertical to pair
+                int nextVIndex = -1;
+                for (int j = i + 1; j < daysPhotos.length; j++) {
+                    if (isVert(daysPhotos[j])) {
+                       nextVIndex = j;
+                       break;
+                    }
+                    // If we stick strictly to chronological, we shouldn't skip Horizontals to find a Vertical match too far away
+                    // User said "Order Chronological".
+                    // If we have V, H, V.
+                    // Should we pair V, V and put H later? Or H then V?
+                    // "mantendo ordem cronologica".
+                    // If V, H, V:
+                    // Page 1: V (Leftover?)
+                    // Page 2: H
+                    // Page 3: V (Leftover?)
+                    // This creates 3 pages.
+                    // If we Group V, V: Page 1 (2V), Page 2 (1H). 2 pages. Cleaner.
+                    // Usually "Chronological" allows slight reordering for layout optimization within a small window.
+                    // But if strict... 
+                    // Let's look for *immediate* next or *closest* next.
+                    // I will check if the NEXT one is vertical.
+                }
+                
+                if (nextVIndex != -1) {
+                    // We found a pair.
+                    // Is it immediate? i.e. nextVIndex == i+1?
+                    // If not, we have intermediate Horizontals.
+                    // We process the Verticals as a pair effectively skipping the H for a moment?
+                    // Or process H first?
+                    // To keep it simple and mostly chronological:
+                    // If current is V:
+                    // Check i+1. If V -> Pair.
+                    // If H -> Process V as single? Or Skip V to process H?
+                    // Implementation: We'll pull the pair (V1, V2) out even if separated by H, 
+                    // provided they are reasonably close (same day is close enough).
+                    // This "optimizes" layout while keeping day order relative.
+                    
+                    final v2 = daysPhotos.removeAt(nextVIndex); // Remove the future V
+                    // Remove current V (by increment loop or explicit)
+                    // Be careful with index shift.
+                    // Better: use a local list and removeAt(0).
+                    // Refactor loop to use `while(daysPhotos.isNotEmpty)`
+                }
+             }
+             i++;
+          }
+          
+          // Refactored Content Loop for correct consumption
+          List<LibraryAsset> dayRemaining = List.from(daysPhotos);
+          while (dayRemaining.isNotEmpty) {
+             final current = dayRemaining[0];
+             
+             if (!isVert(current)) {
+                // Horizontal -> Solo Page
+                dayRemaining.removeAt(0);
+                 final pagePhotos = TemplateSystem.applyTemplate(
+                    '1_solo_horizontal_large', // Uses 80% logic usually? Or we need specific
+                    [PhotoItem(id: Uuid().v4(), path: current.path, width: pW, height: pH)], 
+                    pW, pH
+                 );
+                 newPages.add(AlbumPage(id: Uuid().v4(), widthMm: pW, heightMm: pH, photos: pagePhotos, pageNumber: 0));
+             } else {
+                // Vertical
+                // Look for a partner in the list
+                final partnerIndex = dayRemaining.indexWhere((a) => isVert(a), 1);
+                
+                if (partnerIndex != -1) {
+                   // Found Pair
+                   final v1 = dayRemaining.removeAt(0);
+                   final v2 = dayRemaining.removeAt(partnerIndex - 1); // index shifted after removeAt(0)? No, indexWhere was on original. 
+                   // Wait, removeAt(0) shifts indices.
+                   // partnerIndex was relative to `dayRemaining` BEFORE removeAt(0).
+                   // So after removeAt(0), the partner is at `partnerIndex - 1`.
+                   
+                   final pagePhotos = TemplateSystem.applyTemplate(
+                      '2_portrait_pair', 
+                      [
+                        PhotoItem(id: Uuid().v4(), path: v1.path, width: pW, height: pH),
+                        PhotoItem(id: Uuid().v4(), path: v2.path, width: pW, height: pH)
+                      ], 
+                      pW, pH
+                   );
+                   newPages.add(AlbumPage(id: Uuid().v4(), widthMm: pW, heightMm: pH, photos: pagePhotos, pageNumber: 0));
+                } else {
+                   // No partner -> Single V
+                   // Default: Half Page Right (Cover style) or Centered?
+                   // User didn't specify. I'll use Half Page Right for consistency with "Verticals usually on right".
+                   final v1 = dayRemaining.removeAt(0);
+                   final pagePhotos = TemplateSystem.applyTemplate(
+                      '1_vertical_half_right', 
+                      [PhotoItem(id: Uuid().v4(), path: v1.path, width: pW, height: pH)], 
+                      pW, pH
+                   );
+                   newPages.add(AlbumPage(id: Uuid().v4(), widthMm: pW, heightMm: pH, photos: pagePhotos, pageNumber: 0));
+                }
+             }
+          }
       }
 
-      // 4. Update State: Append
+      // C3. Back Cover
+      if (backCoverPhoto != null) {
+          final pagePhotos = TemplateSystem.applyTemplate(
+             '1_vertical_half_right', 
+             [PhotoItem(id: Uuid().v4(), path: backCoverPhoto.path, width: pW, height: pH)], 
+             pW, pH
+          );
+          newPages.add(AlbumPage(id: Uuid().v4(), widthMm: pW, heightMm: pH, photos: pagePhotos, pageNumber: 0));
+      }
+
+      // 4. Update State
       int startNum = state.project.pages.length + 1;
       for (int i=0; i<newPages.length; i++) {
           newPages[i] = newPages[i].copyWith(pageNumber: startNum + i);
@@ -443,17 +657,10 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
 
       state = state.copyWith(
         project: state.project.copyWith(pages: updatedPages),
-      );
-      
-      // Auto-Group Verticals immediately after generation (User Request)
-      // This fixes single vertical pages by pairing them
-      groupConsecutiveVerticals();
-      
-      // Final Cleanup
-      state = state.copyWith(
         selectedBrowserPaths: {},
         isProcessing: false,
       );
+      
     } catch (e, stack) {
       debugPrint("Error in Smart Flow: $e \n $stack");
       state = state.copyWith(isProcessing: false);
@@ -465,6 +672,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
       pages.add(_createDefaultPage(
         widthMm: pages[0].widthMm,
         heightMm: pages[0].heightMm,
+        backgroundPath: state.project.defaultBackgroundPath,
       ));
     }
 
@@ -676,7 +884,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
         h = state.project.pages.first.heightMm;
     }
     
-    final newPage = _createDefaultPage(widthMm: w, heightMm: h);
+    final newPage = _createDefaultPage(widthMm: w, heightMm: h, backgroundPath: state.project.defaultBackgroundPath);
     final updatedPages = [...state.project.pages, newPage];
     final updatedProject = state.project.copyWith(
       pages: updatedPages,
@@ -816,6 +1024,45 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     } catch (_) {}
   }
 
+  Future<void> setBackground(String path, {bool applyToAll = false}) async {
+    _saveStateToHistory();
+    if (applyToAll) {
+       final newPages = state.project.pages.map((p) => p.copyWith(backgroundPath: path)).toList();
+       state = state.copyWith(
+          project: state.project.copyWith(
+             defaultBackgroundPath: path,
+             pages: newPages,
+          )
+       );
+    } else {
+       final pIdx = state.project.currentPageIndex;
+       final currentPage = state.project.pages[pIdx];
+       final updatedPage = currentPage.copyWith(backgroundPath: path);
+       final updatedPages = List<AlbumPage>.from(state.project.pages);
+       updatedPages[pIdx] = updatedPage;
+       state = state.copyWith(project: state.project.copyWith(pages: updatedPages));
+    }
+  }
+
+  void removeBackground() {
+     _saveStateToHistory();
+     final pIdx = state.project.currentPageIndex;
+     final currentPage = state.project.pages[pIdx];
+     // Reconstruct to clear
+     final clearedPage = AlbumPage(
+        id: currentPage.id,
+        widthMm: currentPage.widthMm,
+        heightMm: currentPage.heightMm,
+        backgroundColor: currentPage.backgroundColor,
+        pageNumber: currentPage.pageNumber,
+        photos: currentPage.photos, 
+        backgroundPath: null,
+     );
+     final updatedPages = List<AlbumPage>.from(state.project.pages);
+     updatedPages[pIdx] = clearedPage;
+     state = state.copyWith(project: state.project.copyWith(pages: updatedPages));
+  }
+
   void bringToFront(String photoId) {
     _saveStateToHistory();
     final pIdx = state.project.currentPageIndex;
@@ -903,6 +1150,110 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     state = state.copyWith(
       clipboardPhoto: target.copyWith(id: Uuid().v4()),
     );
+  }
+
+  // --- Shortcuts Actions ---
+  
+  void toggleEditMode() {
+     setEditingContent(!state.isEditingContent);
+  }
+
+  void panSelectedPhotoContent(double dx, double dy) {
+    if (state.selectedPhotoId == null) return;
+    
+    final pIdx = state.project.currentPageIndex;
+    final page = state.project.pages[pIdx];
+    
+    try {
+       final photo = page.photos.firstWhere((p) => p.id == state.selectedPhotoId);
+       
+       // Update Content Position (Crop)
+       // This moves the image INSIDE the frame.
+       // Usually delta needs to be scaled by contentScale or something?
+       // Just applying raw delta for now. User can hold key.
+       
+       final newPhoto = photo.copyWith(
+          contentX: photo.contentX + dx,
+          contentY: photo.contentY + dy,
+       );
+       
+       final updatedPhotos = page.photos.map((p) => p.id == photo.id ? newPhoto : p).toList();
+       final updatedPage = page.copyWith(photos: updatedPhotos);
+       final updatedPages = List<AlbumPage>.from(state.project.pages);
+       updatedPages[pIdx] = updatedPage;
+       
+       // No History Save for continuous pan? Or throttle?
+       // For keyboard usage, maybe save only on KeyUp? 
+       // For now, we update state directly. 
+       // If we want Undo, we must save history. But panning generates 100s of history steps.
+       // Ideally we'd debounce save.
+       
+       state = state.copyWith(project: state.project.copyWith(pages: updatedPages));
+       
+    } catch (_) {}
+  }
+
+  void selectAdjacentPhoto(String direction) {
+     if (state.selectedPhotoId == null) {
+        // Select first if none selected
+        if (state.project.pages[state.project.currentPageIndex].photos.isNotEmpty) {
+           selectPhoto(state.project.pages[state.project.currentPageIndex].photos.first.id);
+        }
+        return;
+     }
+
+     final pIdx = state.project.currentPageIndex;
+     final page = state.project.pages[pIdx];
+     
+     PhotoItem? current;
+     try {
+       current = page.photos.firstWhere((p) => p.id == state.selectedPhotoId);
+     } catch (_) { return; }
+     
+     final cx = current!.x + current.width / 2;
+     final cy = current.y + current.height / 2;
+     
+     PhotoItem? bestCandidate;
+     double bestDist = double.infinity;
+     
+     for (var p in page.photos) {
+        if (p.id == current.id) continue;
+        
+        final px = p.x + p.width / 2;
+        final py = p.y + p.height / 2;
+        final dx = px - cx;
+        final dy = py - cy;
+        
+        bool isDirection = false;
+        
+        switch (direction) {
+           case 'left':
+             // mostly left (negative dx) and dx is significant relative to dy
+             if (dx < -1 && (dx.abs() > dy.abs() * 0.5)) isDirection = true;
+             break;
+           case 'right':
+             if (dx > 1 && (dx.abs() > dy.abs() * 0.5)) isDirection = true;
+             break;
+           case 'up':
+             if (dy < -1 && (dy.abs() > dx.abs() * 0.5)) isDirection = true;
+             break;
+           case 'down':
+             if (dy > 1 && (dy.abs() > dx.abs() * 0.5)) isDirection = true;
+             break;
+        }
+        
+        if (isDirection) {
+           final dist = dx*dx + dy*dy;
+           if (dist < bestDist) {
+              bestDist = dist;
+              bestCandidate = p;
+           }
+        }
+     }
+     
+     if (bestCandidate != null) {
+        selectPhoto(bestCandidate.id);
+     }
   }
 
   void pastePhoto([double? x, double? y]) {
@@ -1132,9 +1483,9 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   void generateLabels({required bool allPages}) {
     _saveStateToHistory();
     
-    final labelText = state.project.contractNumber.isEmpty 
-        ? "Etiqueta" 
-        : state.project.contractNumber;
+    final labelText = state.project.name.isNotEmpty 
+        ? state.project.name 
+        : (state.project.contractNumber.isNotEmpty ? state.project.contractNumber : "Etiqueta");
     
     final updatedPages = <AlbumPage>[];
     
@@ -1378,8 +1729,11 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     try {
       final jsonStr = await File(path).readAsString();
       final jsonMap = jsonDecode(jsonStr);
-      final project = Project.fromJson(jsonMap);
+      var project = Project.fromJson(jsonMap);
       
+      // Smart Relink
+      project = await _smartRelinkAssets(project, path);
+
       _undoStack.clear();
       _redoStack.clear();
       
@@ -1397,6 +1751,88 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
       debugPrint("Error loading project: $e");
     }
   }
+
+  Future<Project> _smartRelinkAssets(Project project, String projectPath) async {
+      final projectDir = File(projectPath).parent.path;
+      bool changed = false;
+      final newPages = <AlbumPage>[];
+
+      for (final page in project.pages) {
+          final newPhotos = <PhotoItem>[];
+          // Check Background
+          String? newBgPath = page.backgroundPath;
+          if (newBgPath != null && newBgPath.isNotEmpty) {
+             if (!File(newBgPath).existsSync()) {
+                 final candidate = p.join(projectDir, p.basename(newBgPath));
+                 if (File(candidate).existsSync()) {
+                     newBgPath = candidate;
+                     changed = true;
+                     debugPrint("Smart Relink: Fixed Background $candidate");
+                 }
+             }
+          }
+
+          bool pagePhotosChanged = false;
+          for (final photo in page.photos) {
+              if (photo.isText) {
+                  newPhotos.add(photo);
+                  continue;
+              }
+              
+              String currentPath = photo.path;
+              // Check file existence
+              if (currentPath.isNotEmpty && !File(currentPath).existsSync()) {
+                   // Try to find in project dir
+                   final candidate = p.join(projectDir, p.basename(currentPath));
+                   if (File(candidate).existsSync()) {
+                       newPhotos.add(photo.copyWith(path: candidate));
+                       pagePhotosChanged = true;
+                       changed = true;
+                       debugPrint("Smart Relink: Fixed Photo $candidate");
+                       continue;
+                   }
+              }
+              newPhotos.add(photo);
+          }
+          
+          if (pagePhotosChanged || newBgPath != page.backgroundPath) {
+             newPages.add(page.copyWith(photos: newPhotos, backgroundPath: newBgPath));
+          } else {
+             newPages.add(page);
+          }
+      }
+
+
+
+      // Fix Gallery Paths (allImagePaths)
+      final newAllPaths = <String>[];
+      bool galleryChanged = false;
+      for (final path in project.allImagePaths) {
+         if (path.isEmpty) continue;
+         String finalPath = path;
+         
+         if (!File(path).existsSync()) {
+             final candidate = p.join(projectDir, p.basename(path));
+             if (File(candidate).existsSync()) {
+                 finalPath = candidate;
+                 galleryChanged = true;
+                // debugPrint("Smart Relink: Fixed Gallery Path $candidate");
+             }
+         }
+         newAllPaths.add(finalPath);
+      }
+
+      if (changed || galleryChanged) {
+          debugPrint("Smart Relink: Project updated with new paths. (Pages: $changed, Gallery: $galleryChanged)");
+          return project.copyWith(
+              pages: newPages,
+              allImagePaths: newAllPaths
+          );
+      }
+      return project;
+  }
+      
+
 
   Future<void> runAutoSelect({Function(String phase, int processed, int total, int selected)? onProgress}) async {
      try {
@@ -1419,9 +1855,101 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
      }
   }
 
+  Future<void> sortPages() async {
+    _saveStateToHistory();
+    
+    // 1. Identify representative photo for each page
+    final pageInfoList = <_PageSortInfo>[];
+    final pathsToFetch = <String>[];
+    
+    for (int i = 0; i < state.project.pages.length; i++) {
+       final page = state.project.pages[i];
+       
+       // Find first visual photo (non-text)
+       final visualPhotos = page.photos.where((p) => !p.isText).toList();
+       
+       if (visualPhotos.isEmpty) {
+          pageInfoList.add(_PageSortInfo(page, null, null));
+          continue;
+       }
+       
+       // Sort visual photos to find top-left
+       visualPhotos.sort((a,b) {
+          final dy = (a.y - b.y).sign.toInt();
+          if (dy != 0) return dy;
+          return (a.x - b.x).sign.toInt();
+       });
+       
+       final rep = visualPhotos.first;
+       if (rep.path.isNotEmpty) {
+           pageInfoList.add(_PageSortInfo(page, rep.path, null));
+           pathsToFetch.add(rep.path);
+       } else {
+           pageInfoList.add(_PageSortInfo(page, null, null));
+       }
+    }
+    
+    // 2. Fetch Metadata
+    if (pathsToFetch.isNotEmpty) {
+       final metadataList = await MetadataHelper.getMetadataBatch(pathsToFetch);
+       
+       final metaMap = <String, PhotoMetadata>{};
+       for (int i = 0; i < pathsToFetch.length; i++) {
+          metaMap[pathsToFetch[i]] = metadataList[i];
+       }
+       
+       // Fill info
+       for (var info in pageInfoList) {
+          if (info.repPath != null && metaMap.containsKey(info.repPath)) {
+             info.metadata = metaMap[info.repPath];
+          }
+       }
+    }
+    
+    // 3. Sort
+    pageInfoList.sort((a, b) {
+       final ta = a.metadata?.dateTaken ?? DateTime(2100); 
+       final tb = b.metadata?.dateTaken ?? DateTime(2100);
+       
+       // A. Date (Day)
+       final dayA = DateTime(ta.year, ta.month, ta.day);
+       final dayB = DateTime(tb.year, tb.month, tb.day);
+       int dayC = dayA.compareTo(dayB);
+       if (dayC != 0) return dayC;
+       
+       // B. Camera
+       final ca = a.metadata?.cameraModel ?? "";
+       final cb = b.metadata?.cameraModel ?? "";
+       int camC = ca.compareTo(cb);
+       if (camC != 0) return camC;
+       
+       // C. Time
+       return ta.compareTo(tb);
+    });
+    
+    // 4. Update State
+    final newPages = pageInfoList.map((info) => info.page).toList();
+    
+    // Renumber
+    final renumbPages = <AlbumPage>[];
+    for(int i=0; i<newPages.length; i++) {
+       renumbPages.add(newPages[i].copyWith(pageNumber: i + 1));
+    }
+    
+    state = state.copyWith(project: state.project.copyWith(pages: renumbPages));
+  }
+
 }
+
 
 // --- Provider ---
 final projectProvider = StateNotifierProvider<ProjectNotifier, PhotoBookState>((ref) {
-  return ProjectNotifier();
+  return ProjectNotifier(ref);
 });
+
+class _PageSortInfo {
+   final AlbumPage page;
+   final String? repPath;
+   PhotoMetadata? metadata;
+   _PageSortInfo(this.page, this.repPath, this.metadata);
+}

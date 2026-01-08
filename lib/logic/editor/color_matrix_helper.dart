@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'package:image/image.dart' as img;
 
 class ColorMatrixHelper {
   
@@ -136,5 +137,50 @@ class ColorMatrixHelper {
       }
     }
     return result;
+  }
+  static img.Image applyColorMatrix(img.Image src, List<double> matrix) {
+    // Standard 5x4 Matrix:
+    // [ a, b, c, d, e,
+    //   f, g, h, i, j,
+    //   k, l, m, n, o,
+    //   p, q, r, s, t ]
+    //
+    // R' = a*R + b*G + c*B + d*A + e
+    // G' = f*R + g*G + h*B + i*A + j
+    // ...
+    // Note: Our matrix might be 20 items flat list.
+
+    if (matrix.length != 20) return src;
+
+    // Pre-calculate constants for speed if possible, but local vars are fine.
+    final m = matrix;
+
+    // Use loop
+    for (var pixel in src) {
+       // Normalize 0-255 to 0-255 (or 0-1 depending on logic? Our matrix logic assumed 0-255 or RGB input?)
+       // ColorMatrixHelper.getMatrix assumed "value: -1 to 1 (add to RGB)".
+       // Wait, `getMatrix` logic:
+       //   Contrast: (1.0 - c) / 2.0 * 255.0 -> This implies the offsets (e, j, o) are in 0..255 space.
+       //   Exposure: Mult.
+       //   So input R,G,B should be 0..255.
+       
+       double r = pixel.r.toDouble();
+       double g = pixel.g.toDouble();
+       double b = pixel.b.toDouble();
+       double a = pixel.a.toDouble();
+
+       double newR = (m[0]*r) + (m[1]*g) + (m[2]*b) + (m[3]*a) + m[4]; // + offset
+       double newG = (m[5]*r) + (m[6]*g) + (m[7]*b) + (m[8]*a) + m[9];
+       double newB = (m[10]*r) + (m[11]*g) + (m[12]*b) + (m[13]*a) + m[14];
+       double newA = (m[15]*r) + (m[16]*g) + (m[17]*b) + (m[18]*a) + m[19];
+
+       // Clamp
+       pixel.r = max(0, min(255, newR));
+       pixel.g = max(0, min(255, newG));
+       pixel.b = max(0, min(255, newB));
+       pixel.a = max(0, min(255, newA));
+    }
+    
+    return src;
   }
 }
