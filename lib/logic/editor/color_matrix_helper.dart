@@ -183,4 +183,42 @@ class ColorMatrixHelper {
     
     return src;
   }
+
+  /// Align histogram between 5 and 252 (Levels)
+  static img.Image autoLevel(img.Image src) {
+     int minL = 255;
+     int maxL = 0;
+     
+     // 1. Find Min/Max Luminance
+     var p = src.getPixel(0, 0);
+     for (var pixel in src) {
+        // Simple luminance approx
+        int lum = (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b).round();
+        if (lum < minL) minL = lum;
+        if (lum > maxL) maxL = lum;
+     }
+
+     // Avoid divide by zero if plain image
+     if (maxL <= minL) return src;
+
+     // Target Range
+     const int targetMin = 5;
+     const int targetMax = 252;
+     
+     // Stretch Factor
+     // formula: New = (Old - MinL) * (TMax - TMin) / (MaxL - MinL) + TMin
+     double scale = (targetMax - targetMin) / (maxL - minL);
+
+     for (var pixel in src) {
+        pixel.r = _levelPixel(pixel.r, minL, scale, targetMin);
+        pixel.g = _levelPixel(pixel.g, minL, scale, targetMin);
+        pixel.b = _levelPixel(pixel.b, minL, scale, targetMin);
+     }
+     return src;
+  }
+
+  static num _levelPixel(num val, int minL, double scale, int targetMin) {
+     double v = (val - minL) * scale + targetMin;
+     return max(0, min(255, v));
+  }
 }

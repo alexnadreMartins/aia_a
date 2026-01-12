@@ -11,24 +11,24 @@ class TemplateSystem {
       ]
     },
     '1_centered_large': {
-      'name': 'Centered Large',
+      'name': 'Centered Large (95%)',
       'image_count': 1,
       'layout': [
-        {'x': 0.1, 'y': 0.1, 'width': 0.8, 'height': 0.8}
+        {'x': 0.025, 'y': 0.025, 'width': 0.95, 'height': 0.95}
       ]
     },
     '1_centered_medium': {
       'name': 'Centered Medium',
       'image_count': 1,
       'layout': [
-        {'x': 0.2, 'y': 0.2, 'width': 0.6, 'height': 0.6}
+        {'x': 0.15, 'y': 0.15, 'width': 0.7, 'height': 0.7}
       ]
     },
     '1_solo_horizontal_large': {
-      'name': 'Solo Horizontal Large',
+      'name': 'Solo Horizontal',
       'image_count': 1,
       'layout': [
-        {'x': 0.05, 'y': 0.1, 'width': 0.9, 'height': 0.8}
+        {'x': 0.025, 'y': 0.025, 'width': 0.95, 'height': 0.95}
       ]
     },
     '1_hero_landscape': {
@@ -36,7 +36,7 @@ class TemplateSystem {
       'image_count': 1,
       'is_landscape_only': true,
       'layout': [
-        {'x': 0.05, 'y': 0.25, 'width': 0.9, 'height': 0.5}
+        {'x': 0.025, 'y': 0.1, 'width': 0.95, 'height': 0.8}
       ]
     },
     '1_vertical_half_right': {
@@ -44,17 +44,17 @@ class TemplateSystem {
        'image_count': 1,
        'is_portrait_only': true,
        'layout': [
-         {'x': 0.525, 'y': 0.05, 'width': 0.425, 'height': 0.9} 
+         {'x': 0.51, 'y': 0.025, 'width': 0.465, 'height': 0.95} 
        ]
     },
     
     // --- 2 Photos ---
     '2_side_by_side': {
-      'name': 'Side by Side',
+      'name': 'Side by Side (95%)',
       'image_count': 2,
       'layout': [
-        {'x': 0.05, 'y': 0.2, 'width': 0.425, 'height': 0.6},
-        {'x': 0.525, 'y': 0.2, 'width': 0.425, 'height': 0.6}
+        {'x': 0.025, 'y': 0.025, 'width': 0.465, 'height': 0.95},
+        {'x': 0.51, 'y': 0.025, 'width': 0.465, 'height': 0.95}
       ]
     },
     '2_full_horizontal': {
@@ -66,11 +66,11 @@ class TemplateSystem {
       ]
     },
     '2_top_bottom': {
-      'name': 'Top & Bottom',
+      'name': 'Top & Bottom (95%)',
       'image_count': 2,
       'layout': [
-        {'x': 0.1, 'y': 0.05, 'width': 0.8, 'height': 0.425},
-        {'x': 0.1, 'y': 0.525, 'width': 0.8, 'height': 0.425}
+        {'x': 0.025, 'y': 0.025, 'width': 0.95, 'height': 0.465},
+        {'x': 0.025, 'y': 0.51, 'width': 0.95, 'height': 0.465}
       ]
     },
     '2_full_vertical_split': {
@@ -82,12 +82,12 @@ class TemplateSystem {
        ]
     },
     '2_portrait_pair': {
-      'name': 'Portrait Pair',
+      'name': 'Portrait Pair (95%)',
       'image_count': 2,
       'is_portrait_only': true,
       'layout': [
-        {'x': 0.1, 'y': 0.15, 'width': 0.38, 'height': 0.7},
-        {'x': 0.52, 'y': 0.15, 'width': 0.38, 'height': 0.7}
+        {'x': 0.025, 'y': 0.025, 'width': 0.465, 'height': 0.95},
+        {'x': 0.51, 'y': 0.025, 'width': 0.465, 'height': 0.95}
       ]
     },
     'event_opening': {
@@ -98,11 +98,11 @@ class TemplateSystem {
       ]
     },
     '2_vertical_full': {
-      'name': '2 Vertical Full',
+      'name': '2 Vertical (95%)',
       'image_count': 2,
       'layout': [
-        {'x': 0.05, 'y': 0.05, 'width': 0.425, 'height': 0.9},
-        {'x': 0.525, 'y': 0.05, 'width': 0.425, 'height': 0.9}
+        {'x': 0.025, 'y': 0.025, 'width': 0.465, 'height': 0.95},
+        {'x': 0.51, 'y': 0.025, 'width': 0.465, 'height': 0.95}
       ]
     },
 
@@ -111,9 +111,9 @@ class TemplateSystem {
       'name': 'One Big, Two Small',
       'image_count': 3,
       'layout': [
-        {'x': 0.05, 'y': 0.05, 'width': 0.55, 'height': 0.9}, // Big Left
-        {'x': 0.65, 'y': 0.05, 'width': 0.3, 'height': 0.425}, // Top Right
-        {'x': 0.65, 'y': 0.525, 'width': 0.3, 'height': 0.425}  // Bottom Right
+        {'x': 0.025, 'y': 0.025, 'width': 0.49, 'height': 0.95}, // Big Left
+        {'x': 0.54, 'y': 0.025, 'width': 0.435, 'height': 0.465}, // Top Right
+        {'x': 0.54, 'y': 0.51, 'width': 0.435, 'height': 0.465}  // Bottom Right
       ]
     },
     '3_columns_full': {
@@ -129,21 +129,21 @@ class TemplateSystem {
       'name': 'Three Columns',
       'image_count': 3,
       'layout': [
-        {'x': 0.05, 'y': 0.2, 'width': 0.26, 'height': 0.6},
-        {'x': 0.37, 'y': 0.2, 'width': 0.26, 'height': 0.6},
-        {'x': 0.69, 'y': 0.2, 'width': 0.26, 'height': 0.6}
+        {'x': 0.025, 'y': 0.025, 'width': 0.3, 'height': 0.95},
+        {'x': 0.35, 'y': 0.025, 'width': 0.3, 'height': 0.95},
+        {'x': 0.675, 'y': 0.025, 'width': 0.3, 'height': 0.95}
       ]
     },
 
     // --- 4 Photos ---
     '4_grid': {
-        'name': '2x2 Grid',
+        'name': '2x2 Grid (95%)',
         'image_count': 4,
         'layout': [
-            {'x': 0.05, 'y': 0.05, 'width': 0.425, 'height': 0.425},
-            {'x': 0.525, 'y': 0.05, 'width': 0.425, 'height': 0.425},
-            {'x': 0.05, 'y': 0.525, 'width': 0.425, 'height': 0.425},
-            {'x': 0.525, 'y': 0.525, 'width': 0.425, 'height': 0.425}
+            {'x': 0.025, 'y': 0.025, 'width': 0.465, 'height': 0.465},
+            {'x': 0.51, 'y': 0.025, 'width': 0.465, 'height': 0.465},
+            {'x': 0.025, 'y': 0.51, 'width': 0.465, 'height': 0.465},
+            {'x': 0.51, 'y': 0.51, 'width': 0.465, 'height': 0.465}
         ]
     },
     '4_grid_full': {
@@ -154,110 +154,6 @@ class TemplateSystem {
             {'x': 0.5, 'y': 0.0, 'width': 0.5, 'height': 0.5},
             {'x': 0.0, 'y': 0.5, 'width': 0.5, 'height': 0.5},
             {'x': 0.5, 'y': 0.5, 'width': 0.5, 'height': 0.5}
-        ]
-    },
-    '4_one_big_three_small': {
-       'name': 'Main + 3 Bottom',
-       'image_count': 4,
-       'layout': [
-          {'x': 0.05, 'y': 0.05, 'width': 0.9, 'height': 0.55},
-          {'x': 0.05, 'y': 0.65, 'width': 0.26, 'height': 0.3},
-          {'x': 0.37, 'y': 0.65, 'width': 0.26, 'height': 0.3},
-          {'x': 0.69, 'y': 0.65, 'width': 0.26, 'height': 0.3}
-       ]
-    },
-    '3_mix_ratio': {
-       'name': 'Mix Ratio',
-       'image_count': 3,
-       'layout': [
-          {'x': 0.05, 'y': 0.05, 'width': 0.9, 'height': 0.4},
-          {'x': 0.05, 'y': 0.5, 'width': 0.425, 'height': 0.45},
-          {'x': 0.525, 'y': 0.5, 'width': 0.425, 'height': 0.45}
-       ]
-    },
-    '4_cinema': {
-       'name': 'Cinema Stripe',
-       'image_count': 4,
-       'layout': [
-          {'x': 0.0, 'y': 0.05, 'width': 1.0, 'height': 0.2},
-          {'x': 0.0, 'y': 0.27, 'width': 1.0, 'height': 0.2},
-          {'x': 0.0, 'y': 0.49, 'width': 1.0, 'height': 0.2},
-          {'x': 0.0, 'y': 0.71, 'width': 1.0, 'height': 0.2}
-       ]
-    },
-    '6_grid': {
-       'name': '3x2 Grid',
-       'image_count': 6,
-       'layout': [
-          {'x': 0.05, 'y': 0.05, 'width': 0.28, 'height': 0.42},
-          {'x': 0.36, 'y': 0.05, 'width': 0.28, 'height': 0.42},
-          {'x': 0.67, 'y': 0.05, 'width': 0.28, 'height': 0.42},
-          {'x': 0.05, 'y': 0.53, 'width': 0.28, 'height': 0.42},
-          {'x': 0.36, 'y': 0.53, 'width': 0.28, 'height': 0.42},
-          {'x': 0.67, 'y': 0.53, 'width': 0.28, 'height': 0.42}
-       ]
-    },
-
-    // --- New THIN / SYMMETRIC Templates (User Request) ---
-    // Spacing: 1.5% (0.015)
-    
-    // 2 Photos
-    '2_thin_side': {
-      'name': 'Side by Side (Thin)',
-      'image_count': 2,
-      'layout': [
-        {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.97}, // 47.75% width
-        {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.97}
-      ]
-    },
-    
-    // 3 Photos
-    '3_thin_1v_2h_left': { // 1 Vertical Left, 2 Horizontal Right
-      'name': '1 Vert, 2 Horirz (Left)',
-      'image_count': 3,
-      'layout': [
-        {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.97}, // Vert Left
-        {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.4775}, // Top Right
-        {'x': 0.5075, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}  // Bot Right
-      ]
-    },
-    '3_thin_1v_2h_right': { // 1 Vertical Right, 2 Horizontal Left
-      'name': '1 Vert, 2 Hor z (Right)',
-      'image_count': 3,
-      'layout': [
-        {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.4775}, // Top Left
-        {'x': 0.015, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}, // Bot Left
-        {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.97}   // Vert Right
-      ]
-    },
-    '3_thin_3cols': {
-      'name': '3 Cols (Thin)',
-      'image_count': 3,
-      'layout': [
-        {'x': 0.015, 'y': 0.015, 'width': 0.313, 'height': 0.97},
-        {'x': 0.343, 'y': 0.015, 'width': 0.313, 'height': 0.97},
-        {'x': 0.671, 'y': 0.015, 'width': 0.313, 'height': 0.97}
-      ]
-    },
-    '3_thin_rows': {
-      'name': '3 Rows (Thin)',
-      'image_count': 3,
-      'layout': [
-        {'x': 0.015, 'y': 0.015, 'width': 0.97, 'height': 0.313},
-        {'x': 0.015, 'y': 0.343, 'width': 0.97, 'height': 0.313},
-        {'x': 0.015, 'y': 0.671, 'width': 0.97, 'height': 0.313}
-      ]
-    },
-
-    // 4 Photos
-    '4_thin_grid': {
-        'name': '2x2 Grid (Thin)',
-        'image_count': 4,
-        'layout': [
-            {'x': 0.015, 'y': 0.015, 'width': 0.4775, 'height': 0.4775},
-            {'x': 0.5075, 'y': 0.015, 'width': 0.4775, 'height': 0.4775},
-            {'x': 0.015, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}, // Fixed coordinate typo (was 0.525 previously)
-            {'x': 0.5075, 'y': 0.5075, 'width': 0.4775, 'height': 0.4775}
         ]
     }
   };

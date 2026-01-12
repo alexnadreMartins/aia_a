@@ -143,6 +143,20 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     return AlbumPage(widthMm: widthMm, heightMm: heightMm, backgroundPath: backgroundPath); 
   }
 
+  void setProject(Project newProject) {
+      _saveStateToHistory();
+      _undoStack.clear(); 
+      _redoStack.clear();
+      
+      state = state.copyWith(
+          project: newProject,
+          multiSelectedPages: {},
+          selectedPhotoId: null,
+          selectedBrowserPaths: {}
+      );
+      _updateUndoRedoFlags();
+  }
+
   void _saveStateToHistory() {
     if (_undoStack.length >= _maxHistory) {
       _undoStack.removeAt(0);
@@ -242,6 +256,29 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     state = state.copyWith(
       project: state.project.copyWith(imageRotations: newRotations)
     );
+  }
+  
+  void rotatePagePhoto(String photoId, double deltaDegrees) {
+      _saveStateToHistory();
+      final newPages = state.project.pages.map((page) {
+          int index = page.photos.indexWhere((p) => p.id == photoId);
+          if (index == -1) return page;
+          
+          final newPhotos = List<PhotoItem>.from(page.photos);
+          final current = newPhotos[index];
+          // Determine new rotation (snap to 90?)
+          // If user wants 90 degree steps:
+          double newRot = current.rotation + deltaDegrees;
+          // Normalize to 0-360 if desired, but Flutter rotation is usually radians or degrees.
+          // PhotoItem uses degrees based on usage in rotateGalleryPhoto logic (passed as int degrees).
+          // But PhotoItem.rotation is double.
+          // Let's keep it cumulative.
+          
+          newPhotos[index] = current.copyWith(rotation: newRot);
+          return page.copyWith(photos: newPhotos);
+      }).toList();
+      
+      state = state.copyWith(project: state.project.copyWith(pages: newPages));
   }
 
   Future<void> _rotateFile(String path, int degrees) async {
@@ -1483,9 +1520,17 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   void generateLabels({required bool allPages}) {
     _saveStateToHistory();
     
-    final labelText = state.project.name.isNotEmpty 
-        ? state.project.name 
-        : (state.project.contractNumber.isNotEmpty ? state.project.contractNumber : "Etiqueta");
+    String labelText;
+    if (state.project.contractNumber.isNotEmpty) {
+       labelText = state.project.contractNumber;
+       if (state.project.name.isNotEmpty) {
+          labelText += " - ${state.project.name}";
+       }
+    } else {
+       labelText = state.project.name.isNotEmpty 
+          ? state.project.name 
+          : "Etiqueta";
+    }
     
     final updatedPages = <AlbumPage>[];
     
@@ -1509,10 +1554,14 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
         continue;
       }
       
-      // Calculate proportional label size based on page dimensions
-      // Calibrated based on user preference (W: 23.5, H: 4.6 on 305 width)
-      final labelWidth = page.widthMm * 0.077;  
+      // Calculate dynamic label size to fit text
+      // Base height 1.5% of page width (approx 4.5mm)
       final labelHeight = page.widthMm * 0.015;
+      // Est. width per char ~ 0.65 * Height
+      final estTextWidth = labelText.length * (labelHeight * 0.65) + (page.widthMm * 0.02);
+      final minWidth = page.widthMm * 0.077;
+      
+      final labelWidth = estTextWidth > minWidth ? estTextWidth : minWidth;
       
       final marginRight = page.widthMm * 0.05;
       final marginBottom = page.heightMm * 0.035;
@@ -1641,21 +1690,33 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
           final filename = file.uri.pathSegments.last;
           final nameNoExt = filename.contains('.') ? filename.substring(0, filename.lastIndexOf('.')) : filename;
           
-          final labelText = contract.isNotEmpty ? "$contract - $nameNoExt" : nameNoExt;
-          
-          // Proportional Sizing (matching generateLabels standard)
-          final labelWidth = page.widthMm * 0.077;  
+          String labelText = nameNoExt;
+          if (contract.isNotEmpty) {
+             labelText = "$contract - $labelText";
+          }
+          if (state.project.name.isNotEmpty) {
+             // Insert Project Name in middle? "Contract - Project - Name"
+             // Or append?
+             // User: "puxe o numero ... puxe o nome do projeto ... e o nome do arquivo"
+             // Let's do: "Contract - Project - Filename"
+             // If contract is empty: "Project - Filename"
+             if (contract.isNotEmpty) {
+                 labelText = "$contract - ${state.project.name} - $nameNoExt";
+             } else {
+                 labelText = "${state.project.name} - $nameNoExt";
+             }
+          }
+
+          // Dynamic Sizing
           final labelHeight = page.widthMm * 0.015;
+          final estTextWidth = labelText.length * (labelHeight * 0.65) + (page.widthMm * 0.02);
+          final labelWidth = estTextWidth > (page.widthMm * 0.2) ? estTextWidth : (page.widthMm * 0.2); // Min 20% width
 
           final label = PhotoItem(
             id: Uuid().v4(),
-            x: photo.x, // Align with photo X? Or Centered? User said "standard".
-                        // generateLabels puts it at bottom right. 
-                        // But Kit labels usually go UNDER the photo? 
-                        // "ao inves de colocar... vai colocar o nome... mantendo padrão"
-                        // I will place it centered under the photo for now or stick to the previous "under" logic but with correct size.
+            x: photo.x, // Align with photo X
             y: photo.y + photo.height + 2, // 2mm padding
-            width: labelWidth * 3, // Filenames are longer than "001", need more width.
+            width: labelWidth,
             height: labelHeight,
             path: "",
             isText: true,

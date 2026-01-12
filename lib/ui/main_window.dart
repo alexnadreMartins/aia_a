@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'widgets/full_screen_viewer.dart';
 import 'widgets/browser_full_screen_viewer.dart';
@@ -7,6 +8,9 @@ import 'dart:ui' as ui;
 import 'widgets/flip_book_viewer.dart';
 import '../logic/auto_diagramming_service.dart';
 import 'widgets/diagram_progress_overlay.dart';
+import '../logic/standard_template_initializer.dart';
+import '../logic/rapid_diagramming_service.dart';
+import 'dialogs/rapid_diagramming_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -30,6 +34,7 @@ import 'editor/image_editor_view.dart';
 import '../../logic/cache_provider.dart';
 import 'widgets/photo_manipulator.dart';
 import 'widgets/properties_panel.dart';
+import 'widgets/task_queue_indicator.dart';
 
 class PhotoBookHome extends ConsumerStatefulWidget {
   const PhotoBookHome({super.key});
@@ -58,8 +63,15 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     
     // Show new project dialog on startup
     WidgetsBinding.instance.addPostFrameCallback((_) {
+       _initializeStandardTemplates(ref);
        _showNewProjectDialog(context, ref);
     });
+  }
+
+  Future<void> _initializeStandardTemplates(WidgetRef ref) async {
+     final paths = await StandardTemplateInitializer.initializeStandardTemplates();
+     // Always refresh so the collection appears, even if empty (so user can drop files there if needed, or see it exists)
+     ref.read(assetProvider.notifier).refreshStandardCollection("Templates Padrão", paths);
   }
 
   @override
@@ -302,6 +314,277 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     );
   }
 
+
+  // --- Rapid Diagramming ---
+
+  void _showRapidDiagrammingDialog(BuildContext context) async {
+      final result = await showDialog(
+         context: context,
+         builder: (ctx) => RapidDiagrammingDialog(onStart: (m, b) {}) 
+      );
+      
+      if (result != null && result is Map) {
+         final mode = result['mode'];
+         final batchPath = result['batchPath'];
+         final templatePath = result['templatePath'];
+         final useAutoSelect = result['useAutoSelect'] ?? true;
+         
+         if (mode == 'individual') {
+            _startRapidDiagramming(context, templatePath: templatePath, useAutoSelect: useAutoSelect);
+         } else if (mode == 'batch' && batchPath != null) {
+            _runBatchRapidDiagramming(batchPath, templatePath: templatePath, useAutoSelect: useAutoSelect);
+         }
+      }
+  }
+  
+  void _startRapidDiagramming(BuildContext context, {String? templatePath, bool useAutoSelect = true}) async {
+     final state = ref.read(projectProvider);
+     if (state.project?.allImagePaths.isEmpty ?? true) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("O projeto atual não possui fotos!")));
+        return;
+     }
+     
+     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Iniciando Diagramação Rápida...")));
+     
+     try {
+        final newProject = await RapidDiagrammingService.generateProject(
+           currentProject: state.project!, 
+           allPhotoPaths: state.project!.allImagePaths, 
+           projectName: state.project!.name,
+           customTemplateDir: templatePath,
+           useAutoSelect: useAutoSelect
+        );
+        
+        ref.read(projectProvider.notifier).setProject(newProject);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Diagramação Concluída!")));
+        
+     } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erro: $e")));
+     }
+  }
+
+  Future<void> _runBatchRapidDiagramming(String rootPath, {String? templatePath, bool useAutoSelect = true}) async {
+      final state = ref.read(projectProvider);
+      final modelProject = state.project;
+      
+      // Inherit dimensions from current open project
+      double targetW = 300.0;
+      double targetH = 300.0;
+      if (modelProject.pages.isNotEmpty) {
+         targetW = modelProject.pages[0].widthMm;
+         targetH = modelProject.pages[0].heightMm;
+      }
+
+      // 1. Scan Subfolders
+      final rootDir = Directory(rootPath);
+      // Sort alphabetic for consistency
+      final entries = rootDir.listSync().whereType<Directory>().toList()..sort((a,b) => p.basename(a.path).toLowerCase().compareTo(p.basename(b.path).toLowerCase()));
+      
+      if (entries.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Nenhuma subpasta encontrada!")));
+          return;
+      }
+      
+      // Progress State
+      ValueNotifier<int> processedCount = ValueNotifier(0);
+      ValueNotifier<String> currentStatus = ValueNotifier("Preparando...");
+      ValueNotifier<String> etaStatus = ValueNotifier("--:--");
+      
+      // Show Progress Dialog
+      showDialog(
+        context: context, 
+        barrierDismissible: false,
+        builder: (ctx) => PopScope(
+          canPop: false, // Prevent closing
+          child: AlertDialog(
+           backgroundColor: const Color(0xFF2C2C2C),
+           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+           content: SizedBox(
+             height: 220, // Increased height for ETA
+             width: 300,
+             child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                   const SizedBox(height: 10),
+                   const CircularProgressIndicator(color: Colors.amberAccent),
+                   const SizedBox(height: 16),
+                   ValueListenableBuilder<String>(
+                      valueListenable: currentStatus,
+                      builder: (c, val, _) => Text(
+                         val, 
+                         style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500), 
+                         textAlign: TextAlign.center,
+                         maxLines: 2,
+                         overflow: TextOverflow.ellipsis,
+                      )
+                   ),
+                   const SizedBox(height: 8),
+                   ValueListenableBuilder<int>(
+                      valueListenable: processedCount,
+                      builder: (c, val, _) => LinearProgressIndicator(
+                         value: entries.isNotEmpty ? val / entries.length : 0,
+                         backgroundColor: Colors.white10,
+                         valueColor: const AlwaysStoppedAnimation<Color>(Colors.greenAccent),
+                      )
+                   ),
+                   const SizedBox(height: 8),
+                   Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                         ValueListenableBuilder<int>(
+                            valueListenable: processedCount,
+                            builder: (c, val, _) => Text(
+                              "$val / ${entries.length}", 
+                              style: const TextStyle(color: Colors.white54, fontSize: 12)
+                            )
+                         ),
+                         ValueListenableBuilder<String>(
+                            valueListenable: etaStatus,
+                            builder: (c, val, _) => Text(
+                              "Previsão: $val", 
+                              style: const TextStyle(color: Colors.amberAccent, fontSize: 12, fontWeight: FontWeight.bold)
+                            )
+                         ),
+                      ],
+                   )
+                ],
+             ),
+           ),
+        ),
+       )
+      );
+      
+      int successCount = 0;
+      final startTime = DateTime.now();
+      
+      for (int i=0; i<entries.length; i++) {
+           final dir = entries[i];
+           final studentName = p.basename(dir.path);
+           
+           // Update Status
+           currentStatus.value = "Processando: $studentName";
+           await Future.delayed(const Duration(milliseconds: 50)); // Allow UI paint
+           
+           // Scan photos
+           final photos = dir.listSync(recursive: true)
+             .whereType<File>()
+             .where((f) => ['.jpg', '.jpeg', '.png'].contains(p.extension(f.path).toLowerCase()))
+             .map((f) => f.path)
+             .toList();
+             
+           if (photos.isEmpty) {
+              processedCount.value = i + 1;
+              continue;
+           }
+           
+           // Generate Project
+           try {
+              // Create seed project with CORRECT DIMENSIONS
+              // We add a dummy page so generateProject picks up the size
+              Project base = Project(
+                  id: Uuid().v4(),
+                  name: studentName,
+                  contractNumber: studentName,
+                  pages: [
+                     AlbumPage(id: Uuid().v4(), photos: [], widthMm: targetW, heightMm: targetH)
+                  ],
+                  allImagePaths: photos
+              );
+              
+              final newProject = await RapidDiagrammingService.generateProject(
+                 currentProject: base,
+                 allPhotoPaths: photos,
+                 projectName: studentName,
+                 customTemplateDir: templatePath,
+                 useAutoSelect: useAutoSelect
+              );
+              
+              // Save
+              final saveFile = p.join(dir.path, "$studentName.alem");
+               final jsonStr = jsonEncode(newProject.toJson());
+               await File(saveFile).writeAsString(jsonStr);
+               
+               successCount++;
+               
+           } catch (e) {
+              debugPrint("Error processing $studentName: $e");
+           }
+           
+           processedCount.value = i + 1;
+           
+           // Calculate ETA
+           if (i < entries.length - 1) { // If not last
+              final now = DateTime.now();
+              final elapsed = now.difference(startTime);
+              final avgMs = elapsed.inMilliseconds / (i + 1);
+              final remaining = entries.length - (i + 1);
+              final etaMs = avgMs * remaining;
+              
+              final etaDuration = Duration(milliseconds: etaMs.toInt());
+              final min = etaDuration.inMinutes;
+              final sec = etaDuration.inSeconds % 60;
+              etaStatus.value = "${min}m ${sec}s";
+           } else {
+              etaStatus.value = "Concluído";
+           }
+      }
+      
+      final endTime = DateTime.now();
+      final totalDuration = endTime.difference(startTime);
+      final avgMillis = (entries.isNotEmpty) ? totalDuration.inMilliseconds ~/ entries.length : 0;
+      final avgDuration = Duration(milliseconds: avgMillis);
+
+      String _printDuration(Duration d) {
+         final m = d.inMinutes;
+         final s = d.inSeconds % 60;
+         return "${m}m ${s}s";
+      }
+
+      if (mounted) {
+         Navigator.pop(context); // Close Progress Dialog
+         
+         showDialog(
+           context: context,
+           builder: (ctx) => AlertDialog(
+              backgroundColor: const Color(0xFF2C2C2C),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              title: const Text("Relatório de Processamento", style: TextStyle(color: Colors.white)),
+              content: Column(
+                 mainAxisSize: MainAxisSize.min,
+                 crossAxisAlignment: CrossAxisAlignment.start,
+                 children: [
+                    Text("Total Processado: ${entries.length} pastas", style: const TextStyle(color: Colors.white70)),
+                    Text("Sucessos: $successCount", style: const TextStyle(color: Colors.greenAccent)),
+                    const Divider(color: Colors.grey),
+                    const SizedBox(height: 8),
+                    Row(
+                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                       children: [
+                          const Text("Tempo Total:", style: TextStyle(color: Colors.white)),
+                          Text(_printDuration(totalDuration), style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold)),
+                       ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                       children: [
+                          const Text("Média por Projeto:", style: TextStyle(color: Colors.white)),
+                          Text(_printDuration(avgDuration), style: const TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold)),
+                       ],
+                    ),
+                 ],
+              ),
+              actions: [
+                 TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text("Fechar", style: TextStyle(color: Colors.lightBlueAccent)),
+                 )
+              ],
+           )
+         );
+      }
+  }
+
   Widget _buildToolbar(BuildContext context, WidgetRef ref, bool canUndo, bool canRedo) {
     return Container(
       height: 50,
@@ -406,17 +689,25 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           PopupMenuButton<String>(
             icon: const Icon(Icons.construction, color: Colors.white70),
             tooltip: "Ferramentas",
-            onSelected: (value) {
+            onSelected: (value) async {
                if (value == 'batch_export') {
                   _showBatchExportDialog(context);
                } else if (value == 'auto_diagram') {
                   _showAutoDiagrammingDialog(context);
+               } else if (value == 'rapid_diagram') {
+                  _showRapidDiagrammingDialog(context);
                } else if (value == 'generate_labels_endpoints') {
-                  ref.read(projectProvider.notifier).generateLabels(allPages: false);
+                  if (await _promptAndSetContractNumber(context, ref)) {
+                      ref.read(projectProvider.notifier).generateLabels(allPages: false);
+                  }
                } else if (value == 'generate_labels_all') {
-                  ref.read(projectProvider.notifier).generateLabels(allPages: true);
+                  if (await _promptAndSetContractNumber(context, ref)) {
+                      ref.read(projectProvider.notifier).generateLabels(allPages: true);
+                  }
                } else if (value == 'generate_labels_kit') {
-                  ref.read(projectProvider.notifier).generateKitLabels();
+                  if (await _promptAndSetContractNumber(context, ref)) {
+                      ref.read(projectProvider.notifier).generateKitLabels();
+                  }
                } else if (value == 'sort_pages') {
                   ref.read(projectProvider.notifier).sortPages();
                }
@@ -428,7 +719,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    children: [
                       Icon(Icons.drive_folder_upload, color: Colors.black54),
                       SizedBox(width: 8),
-                      Text('Exportação em Lote (Auto)'),
+                      Flexible(child: Text('Exportação em Lote (Auto)')),
                    ],
                 ),
                ),
@@ -438,7 +729,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    children: [
                       Icon(Icons.auto_stories, color: Colors.deepPurpleAccent),
                       SizedBox(width: 8),
-                      Text('Diagramação Automática'),
+                      Flexible(child: Text('Diagramação Automática (Smart Flow)')),
+                   ],
+                ),
+               ),
+               const PopupMenuItem<String>(
+                value: 'rapid_diagram',
+                child: Row(
+                   children: [
+                      Icon(Icons.flash_on, color: Colors.amberAccent),
+                      SizedBox(width: 8),
+                      Flexible(child: Text('Diagramação Rápida (Prefixos e Lote)')),
                    ],
                 ),
                ),
@@ -449,7 +750,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    children: [
                      Icon(Icons.label_outline, color: Colors.blueGrey),
                      SizedBox(width: 8),
-                     Text('Gerar Etiquetas (Primeira/Última)'),
+                     Flexible(child: Text('Gerar Etiquetas (Primeira/Última)')),
                    ],
                  ),
                ),
@@ -540,6 +841,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
               ? _buildFileBrowser(ref) 
               : (_leftDockIndex == 1 ? _buildAssetLibrary(ref) : _buildBackgroundLibrary(ref)),
           ),
+          const Divider(height: 1, color: Colors.white12),
+          const TaskQueueIndicator(), // Background Tasks
         ],
       ),
     );
@@ -1376,6 +1679,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                                         )
                                      ),
                                   ...currentPage.photos.map((photo) => _buildPhotoWidget(ref, photo, state.selectedPhotoId == photo.id, key: ValueKey(photo.id))),
+                                  
+                                  // Cut Line Guide (Stroke)
+                                  Positioned.fill(
+                                     child: IgnorePointer(
+                                       child: Container(
+                                         decoration: BoxDecoration(
+                                            border: Border.all(color: Colors.black12, width: 0.5),
+                                         ),
+                                       ),
+                                     ),
+                                  ),
                                 ],
                               ),
                                     ),
@@ -1507,6 +1821,15 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         ),
         const PopupMenuDivider(),
         PopupMenuItem(
+          child: const ListTile(leading: Icon(Icons.rotate_left, color: Colors.white, size: 18), title: Text("Rotacionar Esq (-90º)", style: TextStyle(color: Colors.white))),
+          onTap: () => ref.read(projectProvider.notifier).rotatePagePhoto(photo.id, -90),
+        ),
+        PopupMenuItem(
+          child: const ListTile(leading: Icon(Icons.rotate_right, color: Colors.white, size: 18), title: Text("Rotacionar Dir (+90º)", style: TextStyle(color: Colors.white))),
+          onTap: () => ref.read(projectProvider.notifier).rotatePagePhoto(photo.id, 90),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
           child: const ListTile(leading: Icon(Icons.content_cut, color: Colors.white, size: 18), title: Text("Cortar", style: TextStyle(color: Colors.white))),
           onTap: () => ref.read(projectProvider.notifier).cutPhoto(photo.id),
         ),
@@ -1566,6 +1889,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
      }
 
      if (targetPhoto == null || targetPhoto.path.isEmpty) return;
+
+     // Block Templates (No Editor for Templates)
+     final lowerPath = targetPhoto.path.toLowerCase();
+     if (lowerPath.contains("templates") || lowerPath.contains("molduras") || lowerPath.endsWith(".png")) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+           content: Text("Templates e PNGs não podem ser editados no Editor de Imagem (Iluminação Fixa)."),
+           backgroundColor: Colors.orangeAccent,
+        ));
+        return;
+     }
 
      // Navigate logic reuse
      final paths = ref.read(projectProvider).project.pages
@@ -1885,6 +2218,38 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     }
   }
 
+  Future<bool> _promptAndSetContractNumber(BuildContext context, WidgetRef ref) async {
+      final state = ref.read(projectProvider);
+      final textCtrl = TextEditingController(text: state.project.contractNumber);
+      
+      final result = await showDialog<String>(
+         context: context,
+         builder: (ctx) => AlertDialog(
+            title: const Text("Número do Contrato"),
+            content: Column(
+               mainAxisSize: MainAxisSize.min,
+               children: [
+                  const Text("Informe o Contrato para as etiquetas:"),
+                  TextField(controller: textCtrl, autofocus: true, decoration: const InputDecoration(labelText: "Contrato (ex: 602)")),
+               ],
+            ),
+            actions: [
+               TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+               ElevatedButton(onPressed: () => Navigator.pop(ctx, textCtrl.text.trim()), child: const Text("Confirmar")),
+            ],
+         )
+      );
+      
+      if (result != null && result.isNotEmpty) {
+         ref.read(projectProvider.notifier).setContractNumber(result);
+         return true;
+      }
+      // If user clears it or cancels? Return false if null.
+      // If result is empty string but confirmed, maybe they want to clear?
+      // User said "preciso do numero". If they clear, labels might be empty.
+      return result != null;
+  }
+
   Future<void> _handleLoad(BuildContext context, WidgetRef ref) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -1959,6 +2324,35 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   }
 
   Future<void> _handleExportJpg(BuildContext context, WidgetRef ref) async {
+    // Prompt for Contract Number
+    final contractCtrl = TextEditingController();
+    // Default contract if available in project?
+    contractCtrl.text = ref.read(projectProvider).project.contractNumber; // Pre-fill if stored?
+
+    final proceed = await showDialog<bool>(
+       context: context,
+       builder: (ctx) => AlertDialog(
+          title: const Text("Exportar JPG - Opções"),
+          content: Column(
+             mainAxisSize: MainAxisSize.min,
+             children: [
+                TextField(
+                   controller: contractCtrl,
+                   decoration: const InputDecoration(labelText: "Número do Contrato (Prefixo)", hintText: "Ex: 602"),
+                ),
+                const SizedBox(height: 10),
+                const Text("Exemplo: 602_NomeProjeto_01.jpg", style: TextStyle(fontSize: 12, color: Colors.grey)),
+             ],
+          ),
+          actions: [
+             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancelar")),
+             ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("EXPORTAR")),
+          ],
+       )
+    );
+
+    if (proceed != true) return;
+    
     final result = await FilePicker.platform.getDirectoryPath(
       dialogTitle: "Selecione a pasta para as imagens",
     );
@@ -1966,10 +2360,15 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         final state = ref.read(projectProvider);
         final double exportPixelRatio = state.project.ppi / 25.4;
 
-        // Derive prefix from project path if available
+        // Derive prefix
         String prefix = "pagina";
         if (state.currentProjectPath != null) {
           prefix = p.basenameWithoutExtension(state.currentProjectPath!);
+        }
+        
+        // Add Contract Prefix
+        if (contractCtrl.text.trim().isNotEmpty) {
+           prefix = "${contractCtrl.text.trim()}_$prefix";
         }
 
         _showExportingDialog(context);
@@ -1983,17 +2382,45 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ref.read(projectProvider.notifier).setPageIndex(i);
           ref.read(projectProvider.notifier).selectPhoto(null);
           ref.read(projectProvider.notifier).setEditingContent(false);
-          await Future.delayed(const Duration(milliseconds: 1500));
-          final bytes = await ExportHelper.captureKeyToBytes(_canvasCaptureKey, pixelRatio: exportPixelRatio);
-          if (bytes != null) {
-             final pageNum = (i + 1).toString().padLeft(2, '0');
-             final fileName = "${prefix}_$pageNum.jpg";
-             final filePath = p.join(result, fileName);
-             await ExportHelper.saveAsHighResJpg(
-               pngBytes: bytes, 
-               path: filePath, 
-               dpi: state.project.ppi.toInt()
-             );
+          
+          bool success = false;
+          int retries = 0;
+          
+          while (!success && retries < 3) {
+              // Wait logic: longer on first try, shorter on retries? Or longer on retries?
+              // User said: "guarde essa pagina que deve acontecer uma nova tentativa porque a imagem pode ainda nao estar carregada"
+              // So wait longer on retries.
+              await Future.delayed(Duration(milliseconds: retries == 0 ? 2000 : 4000));
+              
+              final bytes = await ExportHelper.captureKeyToBytes(_canvasCaptureKey, pixelRatio: exportPixelRatio);
+              
+              if (bytes != null) {
+                 final pageNum = (i + 1).toString().padLeft(2, '0');
+                 final fileName = "${prefix}_$pageNum.jpg";
+                 final filePath = p.join(result, fileName);
+                 
+                 await ExportHelper.saveAsHighResJpg(
+                   pngBytes: bytes, 
+                   path: filePath, 
+                   dpi: state.project.ppi.toInt()
+                 );
+                 
+                 // Size Check
+                 final file = File(filePath);
+                 if (file.existsSync() && file.lengthSync() > 500 * 1024) {
+                    success = true;
+                 } else {
+                    print("Page $i export too small (${file.existsSync() ? file.lengthSync() : 0} bytes). Retrying...");
+                    retries++;
+                    // Force refresh/cleanup?
+                    PaintingBinding.instance.imageCache.clear();
+                 }
+              } else {
+                 retries++;
+              }
+          }
+          if (!success) {
+             print("Failed to export page $i with valid size after retries.");
           }
         }
 
@@ -2102,25 +2529,44 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       );
       if (outputPath == null) return;
 
-      // Confirmation
+      // Confirmation & Contract Input
+      final contractCtrl = TextEditingController();
       final confirm = await showDialog<bool>(
          context: context,
          builder: (ctx) => AlertDialog(
             title: const Text("Iniciar Exportação em Lote?"),
-            content: Text("Origem: $inputPath\nDestino: $outputPath\n\nO processo pode demorar. Não feche a janela."),
+            content: SizedBox(
+               width: 300,
+               child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                     const Text("Insira o número de contrato para prefixar\nas pastas (ex: 602_004020)."),
+                     const SizedBox(height: 16),
+                     TextField(
+                        controller: contractCtrl,
+                        decoration: const InputDecoration(
+                           labelText: "Número do Contrato",
+                           hintText: "Ex: 602"
+                        ),
+                     ),
+                     const SizedBox(height: 16),
+                     Text("Origem: $inputPath\nDestino: $outputPath"),
+                  ],
+               ),
+            ),
             actions: [
                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("Cancelar")),
-               TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("Iniciar")),
+               ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("INICIAR")),
             ],
          )
       );
 
       if (confirm == true) {
-         _runBatchExport(inputPath, outputPath);
+         _runBatchExport(inputPath, outputPath, contractNumber: contractCtrl.text.trim());
       }
   }
 
-  Future<void> _runBatchExport(String inputRoot, String outputRoot) async {
+  Future<void> _runBatchExport(String inputRoot, String outputRoot, {String contractNumber = ""}) async {
      try {
         _showExportingDialog(context, message: "Iniciando processo em lote...");
         
@@ -2140,10 +2586,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
            final pPath = pFile.path;
            final pName = p.basenameWithoutExtension(pPath);
            
+           // Apply Contract Prefix logic
+           String folderName = pName;
+           if (contractNumber.isNotEmpty) {
+              folderName = "${contractNumber}_$pName";
+           }
+
            // Update Progress UI (Close previous dialog, open new one)
            if (mounted) {
               Navigator.pop(context); 
-              _showExportingDialog(context, message: "Projeto ${i+1}/$total: $pName");
+              _showExportingDialog(context, message: "Projeto ${i+1}/$total: $folderName");
            }
            
            // Load Project
@@ -2156,7 +2608,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
            final double exportPixelRatio = state.project.ppi / 25.4;
 
            // Create Output Subfolder
-           final projOutputDir = Directory(p.join(outputRoot, pName));
+           final projOutputDir = Directory(p.join(outputRoot, folderName));
            if (!projOutputDir.existsSync()) {
               projOutputDir.createSync(recursive: true);
            }

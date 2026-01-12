@@ -1,3 +1,4 @@
+import 'package:uuid/uuid.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -177,6 +178,70 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
       }).toList(),
     );
     _saveLibrary();
+  }
+
+  // Refreshes (or Creates) a standard collection with a fixed set of files.
+  // Existing assets in this collection that are NOT in the new list might be kept or removed?
+  // "Fixed templates" implies strict sync. Let's strict sync to ensure no stale files.
+  Future<void> refreshStandardCollection(String collectionName, List<String> filePaths) async {
+      // 0. Wait for Library Load to prevent duplicates
+      int retries = 0;
+      while (state.isLoading && retries < 50) { 
+          await Future.delayed(const Duration(milliseconds: 100));
+          retries++;
+      }
+  
+      // 1. Find or Create Collection
+      AssetCollection collection;
+      bool isNew = false;
+      
+      try {
+        collection = state.collections.firstWhere((c) => c.name == collectionName);
+      } catch (e) {
+        isNew = true;
+        collection = AssetCollection(name: collectionName);
+      }
+
+      List<LibraryAsset> finalAssets = List.from(collection.assets);
+      
+      for (var path in filePaths) {
+          // Check if already exists in this collection
+          final exists = finalAssets.any((a) => a.path == path);
+          
+          if (!exists) {
+             // Create New
+             final name = path.split(Platform.pathSeparator).last;
+             double? hX, hY, hW, hH;
+             // Assume standard templates are templates
+             final hole = await _detectHole(path);
+             if (hole != null) {
+               hX = hole.left;
+               hY = hole.top;
+               hW = hole.width;
+               hH = hole.height;
+             }
+             
+             finalAssets.add(LibraryAsset(
+               id: Uuid().v4(),
+               path: path,
+               name: name,
+               type: AssetType.template,
+               holeX: hX, holeY: hY, holeW: hW, holeH: hH,
+             ));
+          }
+      }
+      
+      final newCollection = collection.copyWith(assets: finalAssets);
+      
+      List<AssetCollection> newCollections;
+      if (isNew) {
+         newCollections = [...state.collections, newCollection];
+      } else {
+         newCollections = state.collections.map((c) => c.id == newCollection.id ? newCollection : c).toList();
+      }
+      
+      state = state.copyWith(collections: newCollections);
+      _saveLibrary();
   }
 
   Future<Rect?> _detectHole(String path) async {

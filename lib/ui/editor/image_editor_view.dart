@@ -6,12 +6,13 @@ import '../../logic/editor/editor_state.dart';
 import '../../logic/editor/color_matrix_helper.dart';
 import '../../logic/editor/gemini_service.dart';
 import 'package:image/image.dart' as img;
-import 'package:image/image.dart' as img;
+import 'package:flutter/foundation.dart';
 import 'dart:ui' as ui;
 import '../widgets/scope_widget.dart';
 import '../widgets/histogram_graph.dart';
 import '../widgets/vectorscope_scope.dart';
 import '../../logic/cache_provider.dart';
+import '../../state/task_queue_state.dart';
 
 class ImageEditorView extends ConsumerStatefulWidget {
   final List<String> paths;
@@ -402,7 +403,7 @@ class _ImageEditorViewState extends ConsumerState<ImageEditorView> {
       if (state.isProcessing) return;
 
       notifier.setProcessing(true);
-      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Gemini: Analisando imagem...")));
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("AIA : analisando a imagem...")));
       
       try {
          final suggestions = await GeminiService.analyzeImage(path);
@@ -465,75 +466,114 @@ class _ImageEditorViewState extends ConsumerState<ImageEditorView> {
   Future<void> _saveImage(ImageEditorNotifier notifier, BuildContext context, String path, ImageAdjustments adj) async {
       await _saveInternal(context, path, adj);
       if (context.mounted) {
-         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Imagem Salva!")));
-         // Invalidate cache if needed or rely on Image.file key update
-         setState(() {}); 
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Salvamento iniciado em segundo plano...")));
       }
   }
 
   Future<void> _saveAllSelected(ImageEditorNotifier notifier, BuildContext context, ImageEditorState state) async {
        if (state.selectedPaths.isEmpty) return;
        
-       notifier.setProcessing(true);
-       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Salvando ${state.selectedPaths.length} imagens...")));
+       // Do not block UI
+       // notifier.setProcessing(true); 
+       
+       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Iniciando salvamento de ${state.selectedPaths.length} imagens em segundo plano...")));
        
        try {
-           int count = 0;
            for (final path in state.selectedPaths) {
                final adj = state.allAdjustments[path] ?? const ImageAdjustments();
-               await _saveInternal(context, path, adj);
-               count++;
+               await _saveInternal(context, path, adj); // Returns immediately
            }
-           if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("$count Imagens Salvas com Sucesso!")));
-       } finally {
-           notifier.setProcessing(false);
+       } catch (e) {
+           print("Error initiating save: $e");
        }
+       // Process continues in background
   }
 
   Future<void> _saveInternal(BuildContext context, String path, ImageAdjustments adj) async {
-       // Ideally run in compute
-       // For now logic is similar to BrowserFullScreenViewer
-       // Load -> Apply -> Save
-       print("Saving $path with exposure ${adj.exposure}");
+       // Offload to background queue
+       final notifier = ref.read(taskQueueProvider.notifier);
        
-       try {
-          final bytes = await File(path).readAsBytes();
-          var imgRaw = img.decodeImage(bytes);
-          if (imgRaw == null) return;
-                    // Apply Filters (Simplified for now, matching simple matrix mostly)
-           // MATRIX APPLICATION (WYSIWYS - What You See Is What You Save)
-           final matrix = ColorMatrixHelper.getMatrix(
+       // Prepare Params (Snapshot)
+       final params = _SaveParams(
+          path: path,
+          adj: adj, // Adjustments are immutable
+          matrix: ColorMatrixHelper.getMatrix(
              exposure: adj.exposure,
              contrast: adj.contrast,
              brightness: adj.brightness,
              saturation: adj.saturation,
              temperature: adj.temperature,
              tint: adj.tint
-           );
-           
-           print("DEBUG: Saving with Tint: ${adj.tint}, Temp: ${adj.temperature}");
-           print("DEBUG: Matrix Diagonal: RScale ${matrix[0]}, GScale ${matrix[6]}, BScale ${matrix[12]}");
-           
-           imgRaw = ColorMatrixHelper.applyColorMatrix(imgRaw, matrix);
-           
-           // Encode
-          
-          // Encode
-          final jpg = img.encodeJpg(imgRaw, quality: 90);
-          await File(path).writeAsBytes(jpg);
-          
-          // Force UI Refresh by evicting image cache
-          PaintingBinding.instance.imageCache.clear();
-          PaintingBinding.instance.imageCache.clearLiveImages();
-          
-          // RESET ADJUSTMENTS (As requested: "remove os ajustes pois imagem ja vai carregar tratada")
-          ref.read(imageEditorProvider.notifier).resetAdjustments(path);
-          
-          // Update Version to trigger Scopes Refresh
-          CacheService.invalidate(ref, path);
+          )
+       );
+
+       // Enqueue Task
+       // Capture notifier instance to ensure safe access even if widget disposes
+       final taskNotifier = ref.read(taskQueueProvider.notifier);
+       // We can also capture the editor notifier but accessing it after dispose is risky if it's autoDispose.
+       // However, we can wrap its usage.
        
+       taskNotifier.addTask(
+          "Salvando ${path.split(Platform.pathSeparator).last}...",
+          (id) => _processSaveTaskLogic(id, params, taskNotifier, ref) 
+       );
+  }
+
+  // The logic that runs inside the Queue Execution
+  // We pass 'taskNotifier' explicitly so we don't depend on 'ref' for it.
+  // We still keep 'ref' for other providers, but we must use it safely.
+  Future<void> _processSaveTaskLogic(String taskId, _SaveParams params, TaskQueueNotifier taskNotifier, WidgetRef ref) async {
+       try {
+           taskNotifier.updateTask(taskId, progress: 0.2);
+           
+           // Heavy lifting in Isolate
+           await compute(_executeSaveTask, params);
+           
+           taskNotifier.updateTask(taskId, progress: 1.0, status: TaskStatus.success);
+           
+           // UI Updates in Main Thread
+           await Future.delayed(Duration.zero); // Ensure next frame
+           
+           try {
+             PaintingBinding.instance.imageCache.clear();
+             PaintingBinding.instance.imageCache.clearLiveImages();
+             CacheService.invalidate(ref, params.path);
+             
+             // Reset adjustments - verify if ref is still valid/mounted?
+             // There is no easy 'ref.isMounted'. catch-all is safest.
+             ref.read(imageEditorProvider.notifier).resetAdjustments(params.path);
+           } catch (_) {
+             // If widget disposed, we don't care about UI updates
+           }
+           
        } catch (e) {
-          print("Error Saving: $e");
+           print("Error in Background Save: $e");
+           // Ensure we report error to queue
+           taskNotifier.updateTask(taskId, status: TaskStatus.error, error: e.toString());
        }
   }
+}
+
+class _SaveParams {
+  final String path;
+  final ImageAdjustments adj; 
+  final List<double> matrix;
+  
+  _SaveParams({required this.path, required this.adj, required this.matrix});
+}
+
+Future<void> _executeSaveTask(_SaveParams params) async {
+    final file = File(params.path);
+    final bytes = await file.readAsBytes();
+    var imgRaw = img.decodeImage(bytes);
+    if (imgRaw == null) throw Exception("Failed to decode image");
+
+    imgRaw = ColorMatrixHelper.applyColorMatrix(imgRaw, params.matrix);
+    
+    // Auto Levels (Background)
+    imgRaw = ColorMatrixHelper.autoLevel(imgRaw);
+    
+    // Encode
+    final jpg = img.encodeJpg(imgRaw, quality: 90);
+    await file.writeAsBytes(jpg);
 }
