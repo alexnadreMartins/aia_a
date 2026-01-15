@@ -60,63 +60,64 @@ class ColorMatrixHelper {
         0,0,0,1,0,
      ]);
 
-     // 3. Brightness (Multiplier / Gain) - ALIGNED WITH SAVER
-     // Previously this was Offset, causing mismatch with Saver (which uses Mult).
-     // Now 1.05 means x1.05 RGB (Brighter but blacks stay black).
-     double b = brightness; 
-     mat = _multiply(mat, [
-        b,0,0,0,0,
-        0,b,0,0,0,
-        0,0,b,0,0,
-        0,0,0,1,0,
-     ]);
-     
-     // 4. Saturation
-     double s = saturation;
-     double lumiR = 0.3086;
-     double lumiG = 0.6094;
-     double lumiB = 0.0820;
-     
-     double oneMinusS = 1.0 - s;
-     
-     mat = _multiply(mat, [
-        (oneMinusS * lumiR) + s, (oneMinusS * lumiG), (oneMinusS * lumiB), 0, 0,
-        (oneMinusS * lumiR), (oneMinusS * lumiG) + s, (oneMinusS * lumiB), 0, 0,
-        (oneMinusS * lumiR), (oneMinusS * lumiG), (oneMinusS * lumiB) + s, 0, 0,
-        0, 0, 0, 1, 0,
-     ]);
-     
-     // 5. Temperature (Warm/Cool) & Tint
-     // Temp > 0 -> Red/Yellow Boost, Blue Cut.
-     // Temp < 0 -> Blue Boost, Red Cut.
-     // Tint > 0 -> Magenta Boost, Green Cut.
-     
-     double r = 1.0;
-     double g = 1.0;
-     double bla = 1.0; // b var name conflict
-     
-     if (temperature > 0) {
-        r += temperature * 0.2;
-        bla -= temperature * 0.2;
-     } else {
-        r += temperature * 0.1; // Temp is negative
-        bla -= temperature * 0.2; // -(-0.2) = +0.2
-     }
-     
-     if (tint > 0) {
-        g -= tint * 0.2;
-        r += tint * 0.1;
-        bla += tint * 0.1;
-     } else {
-        g -= tint * 0.2; // tint neg -> +green
-     }
-
-     mat = _multiply(mat, [
-        r,0,0,0,0,
-        0,g,0,0,0,
-        0,0,bla,0,0,
-        0,0,0,1,0,
-     ]);
+      // 3. Brightness (OFFSET / LIFT) - CRITICAL FIX
+      // Previously Multiplier (Gain), which fails to lift pure blacks (0 * x = 0).
+      // Now Offset: Moves the whole histogram. 
+      // Input 1.0 = 0 offset. 1.1 = +25 (approx).
+      double bOffset = (brightness - 1.0) * 128.0; // Stronger range: +/- 0.5 input = +/- 64 levels
+      
+      mat = _multiply(mat, [
+         1,0,0,0,bOffset,
+         0,1,0,0,bOffset,
+         0,0,1,0,bOffset,
+         0,0,0,1,0,
+      ]);
+      
+      // 4. Saturation
+      double s = saturation;
+      double lumiR = 0.3086;
+      double lumiG = 0.6094;
+      double lumiB = 0.0820;
+      
+      double oneMinusS = 1.0 - s;
+      
+      mat = _multiply(mat, [
+         (oneMinusS * lumiR) + s, (oneMinusS * lumiG), (oneMinusS * lumiB), 0, 0,
+         (oneMinusS * lumiR), (oneMinusS * lumiG) + s, (oneMinusS * lumiB), 0, 0,
+         (oneMinusS * lumiR), (oneMinusS * lumiG), (oneMinusS * lumiB) + s, 0, 0,
+         0, 0, 0, 1, 0,
+      ]);
+      
+      // 5. Temperature (Warm/Cool) & Tint
+      // Boosted Coefficients for Visibility
+      
+      double r = 1.0;
+      double g = 1.0;
+      double bla = 1.0; 
+      
+      // Stronger Coeffs: 0.2 was too subtle. Using 0.5 base.
+      if (temperature > 0) {
+         r += temperature * 0.6; // Red boost
+         bla -= temperature * 0.6; // Blue cut
+      } else {
+         r += temperature * 0.3; // (Negative input) Red cut
+         bla -= temperature * 0.6; // (Neg input -> Pos result) Blue boost
+      }
+      
+      if (tint > 0) {
+         g -= tint * 0.6; // Green cut (Magenta boost)
+         r += tint * 0.3; // Slight Red boost
+         bla += tint * 0.3; // Slight Blue boost
+      } else {
+         g -= tint * 0.6; // (Neg input -> Pos result) Green boost
+      }
+ 
+      mat = _multiply(mat, [
+         r,0,0,0,0,
+         0,g,0,0,0,
+         0,0,bla,0,0,
+         0,0,0,1,0,
+      ]);
      
      return mat;
   }

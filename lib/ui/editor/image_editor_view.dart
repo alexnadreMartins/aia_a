@@ -17,11 +17,13 @@ import '../../state/task_queue_state.dart';
 class ImageEditorView extends ConsumerStatefulWidget {
   final List<String> paths;
   final int initialIndex;
+  final bool batchMode;
 
   const ImageEditorView({
     super.key, 
     required this.paths,
     required this.initialIndex,
+    this.batchMode = false,
   });
 
   @override
@@ -168,13 +170,20 @@ class _ImageEditorViewState extends ConsumerState<ImageEditorView> {
                   ),
 
               TextButton.icon(
-                 icon: const Icon(Icons.save, color: Colors.blueAccent),
-                 label: Text(state.selectedPaths.isNotEmpty ? "Salvar Seleção" : "Salvar Atual", style: const TextStyle(color: Colors.blueAccent)),
+                 icon: Icon( widget.batchMode ? Icons.check_circle : Icons.save, color: widget.batchMode ? Colors.greenAccent : Colors.blueAccent),
+                 label: Text(
+                     widget.batchMode ? "Aplicar & Retornar" : (state.selectedPaths.isNotEmpty ? "Salvar Seleção" : "Salvar Atual"), 
+                     style: TextStyle(color: widget.batchMode ? Colors.greenAccent : Colors.blueAccent)
+                 ),
                   onPressed: () {
-                     if (state.selectedPaths.isNotEmpty) {
-                        _saveAllSelected(notifier, context, state);
+                     if (widget.batchMode) {
+                        Navigator.pop(context, state.allAdjustments);
                      } else {
-                        _saveImage(notifier, context, state.currentPath, state.currentAdjustments);
+                        if (state.selectedPaths.isNotEmpty) {
+                           _saveAllSelected(notifier, context, state);
+                        } else {
+                           _saveImage(notifier, context, state.currentPath, state.currentAdjustments);
+                        }
                      }
                   },
                ),

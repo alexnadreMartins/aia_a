@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/asset_state.dart';
 import '../../models/asset_model.dart';
+import 'smart_image.dart';
 import '../widgets/photo_manipulator.dart'; // Reusing for future, or just using standard widgets
 
 class FullScreenViewer extends ConsumerStatefulWidget {
@@ -113,8 +114,8 @@ class _FullScreenViewerState extends ConsumerState<FullScreenViewer> {
                       duration: const Duration(milliseconds: 150),
                       opacity: isPageSelected ? 0.3 : 1.0, // "apagada" behavior
                       child: Center(
-                        child: Image.file(
-                          File(asset.path),
+                        child: SmartImage(
+                          path: asset.path,
                           fit: BoxFit.contain,
                         ),
                       ),

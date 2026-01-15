@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as img;
 import '../models/asset_model.dart';
+import 'package:path/path.dart' as p;
 
 class AssetLibraryState {
   final List<AssetCollection> collections;
@@ -53,12 +54,95 @@ class AssetNotifier extends StateNotifier<AssetLibraryState> {
       }
       final contents = await file.readAsString();
       final List<dynamic> json = jsonDecode(contents);
-      final collections = json.map((c) => AssetCollection.fromJson(c)).toList();
-      state = state.copyWith(collections: collections, isLoading: false);
+      final loadedCollections = json.map((c) => AssetCollection.fromJson(c)).toList();
+      
+      // Attempt to repair paths (if moved between PCs/Users)
+      final repairedCollections = await _repairCollections(loadedCollections);
+
+      state = state.copyWith(collections: repairedCollections, isLoading: false);
+      
+      // If repairs were made, save the updated paths
+      if (loadedCollections != repairedCollections) {
+        debugPrint("Asset library paths repaired. Saving updates...");
+        _saveLibrary();
+      }
+
     } catch (e) {
       debugPrint("Error loading asset library: $e");
       state = state.copyWith(isLoading: false);
     }
+  }
+
+  /// Checks for missing files and attempts to find them in the standard templates folder.
+  /// Returns the repaired list of collections (or the original list if no changes needed).
+  Future<List<AssetCollection>> _repairCollections(List<AssetCollection> original) async {
+    bool anyChange = false;
+    Directory? templatesDir;
+
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      templatesDir = Directory(p.join(appDir.path, 'templates'));
+    } catch (e) {
+      // If we can't find the templates dir, we can't repair.
+    }
+
+    if (templatesDir == null) return original;
+
+    List<AssetCollection> newCollections = [];
+
+    for (var col in original) {
+      List<LibraryAsset> newAssets = [];
+      bool colChanged = false;
+
+      for (var asset in col.assets) {
+        bool repaired = false;
+        
+        // Check if file exists
+        if (!await File(asset.path).exists()) {
+          // File missing. Try to find in templates dir by filename.
+          final filename = p.basename(asset.path);
+          final candidate = File(p.join(templatesDir.path, filename));
+          
+          if (await candidate.exists()) {
+            // Found it! Repair the path.
+            debugPrint("Reparing asset path: ${asset.path} -> ${candidate.path}");
+            
+            // Reconstruct asset with new path
+            newAssets.add(LibraryAsset(
+              id: asset.id,
+              path: candidate.path,
+              name: asset.name,
+              type: asset.type,
+              holeX: asset.holeX,
+              holeY: asset.holeY,
+              holeW: asset.holeW,
+              holeH: asset.holeH,
+              fileDate: asset.fileDate,
+              width: asset.width,
+              height: asset.height,
+              holes: asset.holes,
+              processedPath: asset.processedPath,
+              tags: asset.tags,
+            ));
+            repaired = true;
+            colChanged = true;
+            anyChange = true;
+          }
+        }
+        
+        if (!repaired) {
+          newAssets.add(asset);
+        }
+      }
+
+      if (colChanged) {
+        newCollections.add(col.copyWith(assets: newAssets));
+      } else {
+        newCollections.add(col);
+      }
+    }
+
+    return anyChange ? newCollections : original;
   }
 
   Future<void> _saveLibrary() async {

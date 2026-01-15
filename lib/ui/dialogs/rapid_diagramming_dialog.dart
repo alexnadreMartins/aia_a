@@ -17,7 +17,9 @@ class _RapidDiagrammingDialogState extends State<RapidDiagrammingDialog> {
   String _mode = 'individual'; // individual, batch
   String? _selectedBatchPath;
   String? _customTemplatePath;
+  String? _referencePath;
   bool _useAutoSelect = true;
+  String? _contractNumber;
 
   @override
   Widget build(BuildContext context) {
@@ -77,6 +79,19 @@ class _RapidDiagrammingDialogState extends State<RapidDiagrammingDialog> {
                
                const SizedBox(height: 16),
                
+               // Reference Folder (Smart Learning)
+               const Text("Pasta de Referência (Opcional - Aprender Estilo):", style: TextStyle(color: Colors.white54, fontSize: 12)),
+               const SizedBox(height: 4),
+               _buildPathSelector(
+                 value: _referencePath,
+                 placeholder: "Selecione pasta com projetos .alem prontos...",
+                 onTap: _pickReferenceFolder,
+                 icon: Icons.school,
+               ),
+
+               const SizedBox(height: 16),
+               
+
                // Auto Select
                SwitchListTile(
                  contentPadding: EdgeInsets.zero,
@@ -87,6 +102,22 @@ class _RapidDiagrammingDialogState extends State<RapidDiagrammingDialog> {
                  onChanged: (v) => setState(() => _useAutoSelect = v)
                ),
 
+               const SizedBox(height: 16),
+               
+               // Contract Number
+               const Text("Número do Contrato (Etiquetar Primeira/Última):", style: TextStyle(color: Colors.white54, fontSize: 12)),
+               TextField(
+                 style: const TextStyle(color: Colors.white),
+                 decoration: InputDecoration(
+                    hintText: "Ex: 12345",
+                    hintStyle: const TextStyle(color: Colors.white24),
+                    filled: true,
+                    fillColor: Colors.black26,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8)
+                 ),
+                 onChanged: (v) => _contractNumber = v,
+               ),
             ],
           ),
         ),
@@ -102,19 +133,11 @@ class _RapidDiagrammingDialogState extends State<RapidDiagrammingDialog> {
               foregroundColor: Colors.black,
            ),
            onPressed: (_mode == 'batch' && _selectedBatchPath == null) ? null : () {
-              // Pass values back
-              // We need to update callback signature or use a Map/Object
-              // Let's assume onStart handles extra args or we ignore for now and update MainWindow next
-              // Actually we must update signature first or this won't compile? 
-              // Dart is dynamic-ish but strong mode. 
-              // We will update logic in main_window to match.
-              // For now, let's pass to onStart as: mode, batchPath, templatePath, useAutoSelect
-              // But onStart is defined as (String mode, String? batchPath).
-              // We should change the widget definition too.
               Navigator.pop(context, {
                  'mode': _mode,
                  'batchPath': _selectedBatchPath,
                  'templatePath': _customTemplatePath,
+                 'referencePath': _referencePath,
                  'useAutoSelect': _useAutoSelect
               });
            },
@@ -201,6 +224,13 @@ class _RapidDiagrammingDialogState extends State<RapidDiagrammingDialog> {
     final result = await FilePicker.platform.getDirectoryPath();
     if (result != null) {
       setState(() => _customTemplatePath = result);
+    }
+  }
+
+  Future<void> _pickReferenceFolder() async {
+    final result = await FilePicker.platform.getDirectoryPath();
+    if (result != null) {
+      setState(() => _referencePath = result);
     }
   }
 }

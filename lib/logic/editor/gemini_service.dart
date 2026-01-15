@@ -37,15 +37,24 @@ class GeminiService {
       ];
       
       final promptText = """
-      Analise esta imagem para IMPRESSÃO FOTOGRÁFICA. Responda APENAS em JSON.
-      INCLUA avaliação de SOMBRAS (pretos) e RUÍDO:
+      Analise esta imagem para IMPRESSÃO FOTOGRÁFICA "FINE ART". Responda APENAS em JSON.
+      
+      CRÍTICO: EVITE "AQUECER" (ESQUENTAR) A IMAGEM.
+      - A tendência deve ser NEUTRA ou LIG E IRAMENTE FRIA (Cool Bias).
+      - Tint e Temperatura devem buscar o "BRANCO PURO", sem amarelados.
+      
+      PELE (VECTORSCOPE):
+      - Correção CIRÚRGICA.
+      - Se a pele estiver muito Laranja/Amarela -> RESFRIE (TEMP -).
+      
+      RETORNE:
       {
-          "qualidade_geral": "excelente|boa|regular|ruim",
-          "exposicao": "subexposta|normal|superexposta",
-          "contraste": "baixo|adequado|alto",
-          "sombras": "bloqueadas|escuras|adequadas|lavadas",
-          "nivel_ruido": "baixo|moderado|alto|muito_alto",
-          "resumo": "resumo_breve"
+          "exposicao_correcao": "valor entre -0.5 e 0.5.",
+          "contraste_sugerido": "valor entre 0.95 e 1.15.",
+          "tint_pele": "valor entre -0.5 e 0.5. (Correção de Verde/Magenta)",
+          "temp_pele": "valor entre -0.5 e 0.5. (PREFIRA VALORES NEGATIVOS SE TIVER DÚVIDA).",
+          "sombras_bloqueadas": "true/false",
+          "luzes_estouradas": "true/false"
       }
       """;
 
@@ -79,7 +88,6 @@ class GeminiService {
           if (response.statusCode == 200) {
              print("Gemini Response ($modelName): Success!");
              final data = jsonDecode(response.body);
-             // Parse deep JSON structure
              if (data['candidates'] != null && 
                  (data['candidates'] as List).isNotEmpty &&
                  data['candidates'][0]['content'] != null) {
@@ -87,13 +95,10 @@ class GeminiService {
                  final parts = data['candidates'][0]['content']['parts'] as List;
                  if (parts.isNotEmpty) {
                     final text = parts[0]['text'] as String;
-                    return _calculateConservativeAdjustments(text);
+                    return _calculateCoolNeutralAdjustments(text);
                  }
              }
-          } else {
-             print("Gemini REST Error ($modelName): ${response.statusCode} - ${response.body}");
           }
-
         } catch (e) {
           print("Gemini Client Error ($modelName): $e");
         }
@@ -106,55 +111,79 @@ class GeminiService {
     }
   }
 
-  static Map<String, double> _calculateConservativeAdjustments(String? text) {
+  static Map<String, double> _calculateCoolNeutralAdjustments(String? text) {
      if (text == null) return {};
      try {
-        final cleanText = text.replaceAll('```json', '').replaceAll('```', '').trim();
+        String cleanText = text.replaceAll('```json', '').replaceAll('```', '').trim();
+        final startIndex = cleanText.indexOf('{');
+        final endIndex = cleanText.lastIndexOf('}');
+        if (startIndex != -1 && endIndex != -1) {
+           cleanText = cleanText.substring(startIndex, endIndex + 1);
+        }
+        
         final jsonMap = jsonDecode(cleanText);
         
-        // Defaults (Printing Profile: Lighter Blacks, Safe Exposure)
-        // User feedback: "Pretos muito fortes", needs more exposure/brightness.
-        // Old Default 1.08 Contrast was crushing blacks.
-        double exposure = 0.15; // Start with a mild boost
-        double contrast = 1.0;  // Neutral contrast to keep shadows open
+        double parseDouble(dynamic val, [double def = 0.0]) {
+           if (val == null) return def;
+           if (val is num) return val.toDouble();
+           if (val is String) {
+              return double.tryParse(val.replaceAll(',', '.')) ?? def;
+           }
+           return def;
+        }
+
+        // Defaults - User Preference (Soft & Bright)
+        double exposure = 0.0;
+        double contrast = 0.90; // Requested by User
         double saturation = 1.05; 
-        double brightness = 1.05; // Base brightness boost for printing
-        
-        double temperature = 0.0;
+        double brightness = 1.05; // Requested by User
+        double temperature = -0.05; 
         double tint = 0.0;
-        double sharpness = 0.05;
-        double noiseReduction = 0.0;
+        double sharpness = 0.15; 
+        double noiseReduction = 0.33;
 
-        // 1. Exposure Logic
-        final expStatus = jsonMap['exposicao']?.toString().toLowerCase();
-        if (expStatus == 'subexposta') {
-           exposure = 0.35; // Strong boost
-        } else if (expStatus == 'superexposta') {
-           exposure = -0.10; 
-        }
-
-        // 2. Contrast/Shadows Logic
-        final contrastStatus = jsonMap['contraste']?.toString().toLowerCase();
-        // Check for specific shadow info if available (prompt update needed below)
-        final shadowStatus = jsonMap['sombras']?.toString().toLowerCase();
+        // 1. Exposure
+        exposure = parseDouble(jsonMap['exposicao_correcao'], 0.0);
         
-        if (contrastStatus == 'baixo') {
-           contrast = 1.10; 
-        } else if (contrastStatus == 'alto' || shadowStatus == 'bloqueadas' || shadowStatus == 'escuras') {
-           // If high contrast or blocked shadows, keep contrast at minimum 1.0 (User Rule)
-           contrast = 1.0; 
-           brightness = 1.08; // Boost brightness further to lift shadows
+        // Combine AI contrast with User Baseline
+        // If AI suggests 1.0 (Neutral), we use 0.9.
+        // If AI suggests 1.1 (Contrast+), we use 1.0.
+        double aiContrast = parseDouble(jsonMap['contraste_sugerido'], 1.0);
+        contrast = 0.90 * aiContrast; 
+
+        // Clamps
+        if (exposure > 0.5) exposure = 0.5;
+        if (exposure < -0.5) exposure = -0.5;
+        if (contrast < 0.85) contrast = 0.85; // Allow softer
+        if (contrast > 1.1) contrast = 1.1;   // restrict high contrast
+
+        // 2. TONE LOGIC
+        tint = parseDouble(jsonMap['tint_pele'], 0.0);
+        temperature = parseDouble(jsonMap['temp_pele'], 0.0);
+        
+        if (temperature > 0.15) temperature = 0.15; 
+        if (temperature < -0.5) temperature = -0.5; 
+
+        if (tint > 0.4) tint = 0.4;
+        if (tint < -0.4) tint = -0.4;
+
+        // Recovery
+        bool blackCrush = jsonMap['sombras_bloqueadas'].toString().toLowerCase() == 'true';
+        bool whiteBlow = jsonMap['luzes_estouradas'].toString().toLowerCase() == 'true';
+        
+        if (blackCrush) {
+           brightness += 0.05; // Add to existing 1.05
+        }
+        if (whiteBlow) {
+           exposure -= 0.12;
         }
 
-        // 3. Noise Logic
-        final noiseStatus = jsonMap['nivel_ruido']?.toString().toLowerCase();
-        if (noiseStatus == 'alto' || noiseStatus == 'muito_alto') {
-           noiseReduction = 0.5; 
-        } else if (noiseStatus == 'moderado') {
-           noiseReduction = 0.3; 
+        // 3. Noise
+        String noiseStatus = jsonMap['nivel_ruido']?.toString().toLowerCase() ?? "";
+        if (noiseStatus.contains("alto")) {
+           noiseReduction = 0.55;
         }
-        
-        // Return Map
+
         return {
            'exposure': exposure,
            'contrast': contrast,
@@ -168,7 +197,15 @@ class GeminiService {
 
      } catch (e) {
         print("JSON Parse Error: $e");
-        return {};
+        return {
+           'exposure': 0.05,
+           'contrast': 1.0, 
+           'saturation': 1.05,
+           'sharpness': 0.1,
+           'brightness': 1.02,
+           'temperature': 0.0,
+           'tint': 0.0,
+        };
      }
   }
 }

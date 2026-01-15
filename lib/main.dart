@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:ui';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:window_manager/window_manager.dart';
@@ -51,6 +52,13 @@ class AiAAlbumApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF1E1E1E),
       ),
       themeMode: ThemeMode.dark, 
+      scrollBehavior: const MaterialScrollBehavior().copyWith(
+        dragDevices: {
+          PointerDeviceKind.touch,
+          PointerDeviceKind.stylus,
+          PointerDeviceKind.unknown,
+        },
+      ),
       home: const app_root.RootWidget(),
     );
   }

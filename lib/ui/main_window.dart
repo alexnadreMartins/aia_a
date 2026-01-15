@@ -13,6 +13,7 @@ import '../logic/rapid_diagramming_service.dart';
 import 'dialogs/rapid_diagramming_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart'; // For PointerScrollEvent
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -33,8 +34,11 @@ import '../logic/image_loader.dart';
 import 'editor/image_editor_view.dart';
 import '../../logic/cache_provider.dart';
 import 'widgets/photo_manipulator.dart';
+import 'widgets/smart_image.dart';
 import 'widgets/properties_panel.dart';
 import 'widgets/task_queue_indicator.dart';
+import 'batch_editor/batch_editor_view.dart';
+import '../logic/project_packager.dart';
 
 class PhotoBookHome extends ConsumerStatefulWidget {
   const PhotoBookHome({super.key});
@@ -73,6 +77,13 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
      // Always refresh so the collection appears, even if empty (so user can drop files there if needed, or see it exists)
      ref.read(assetProvider.notifier).refreshStandardCollection("Templates Padrão", paths);
   }
+
+  // Scroll Controllers for Scrollbars
+  final ScrollController _browserScrollCtrl = ScrollController();
+  final ScrollController _galleryScrollCtrl = ScrollController();
+
+  // Toolbar State
+  Offset _toolbarPos = const Offset(100, 100);
 
   @override
   void dispose() {
@@ -270,15 +281,22 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    ),
                    
                    // Bottom Dock (Thumbnails)
-                   Container(
-                     height: 140,
-                     decoration: BoxDecoration(
-                       color: Colors.grey[200],
-                       border: Border(top: BorderSide(color: Colors.grey[400]!)),
+                   SizedBox(
+                     height: 160,
+                     child: _buildDock(
+                       "Linha do Tempo  •  ${state.project.pages.length} Páginas",
+                       double.infinity,
+                       _buildThumbnails(ref, state),
                      ),
-                     child: _buildThumbnails(ref, state),
                    ),
                  ],
+               ),
+               
+               // Touch Controls Overlay (Draggable)
+               Positioned(
+                 left: _toolbarPos.dx,
+                 top: _toolbarPos.dy,
+                 child: _buildTouchControls(context, ref, state),
                ),
                
                if (isProcessing)
@@ -328,16 +346,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
          final batchPath = result['batchPath'];
          final templatePath = result['templatePath'];
          final useAutoSelect = result['useAutoSelect'] ?? true;
+         final contractNumber = result['contractNumber'];
          
          if (mode == 'individual') {
-            _startRapidDiagramming(context, templatePath: templatePath, useAutoSelect: useAutoSelect);
+            _startRapidDiagramming(context, templatePath: templatePath, useAutoSelect: useAutoSelect, contractNumber: contractNumber);
          } else if (mode == 'batch' && batchPath != null) {
-            _runBatchRapidDiagramming(batchPath, templatePath: templatePath, useAutoSelect: useAutoSelect);
+            _runBatchRapidDiagramming(batchPath, templatePath: templatePath, useAutoSelect: useAutoSelect, contractNumber: contractNumber);
          }
       }
   }
   
-  void _startRapidDiagramming(BuildContext context, {String? templatePath, bool useAutoSelect = true}) async {
+  void _startRapidDiagramming(BuildContext context, {String? templatePath, bool useAutoSelect = true, String? contractNumber}) async {
      final state = ref.read(projectProvider);
      if (state.project?.allImagePaths.isEmpty ?? true) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("O projeto atual não possui fotos!")));
@@ -352,7 +371,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
            allPhotoPaths: state.project!.allImagePaths, 
            projectName: state.project!.name,
            customTemplateDir: templatePath,
-           useAutoSelect: useAutoSelect
+           useAutoSelect: useAutoSelect,
+           contractNumber: contractNumber
         );
         
         ref.read(projectProvider.notifier).setProject(newProject);
@@ -363,7 +383,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
      }
   }
 
-  Future<void> _runBatchRapidDiagramming(String rootPath, {String? templatePath, bool useAutoSelect = true}) async {
+  Future<void> _runBatchRapidDiagramming(String rootPath, {String? templatePath, bool useAutoSelect = true, String? contractNumber}) async {
       final state = ref.read(projectProvider);
       final modelProject = state.project;
       
@@ -496,15 +516,22 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                  allPhotoPaths: photos,
                  projectName: studentName,
                  customTemplateDir: templatePath,
-                 useAutoSelect: useAutoSelect
+                 useAutoSelect: useAutoSelect,
+                 contractNumber: contractNumber
               );
               
-              // Save
+              // Save as packaged .alem
               final saveFile = p.join(dir.path, "$studentName.alem");
-               final jsonStr = jsonEncode(newProject.toJson());
-               await File(saveFile).writeAsString(jsonStr);
-               
-               successCount++;
+              
+              // Use ProjectPackager to create Smart Preview
+              currentStatus.value = "Empacotando: $studentName";
+              
+              await ProjectPackager.packProject(newProject, saveFile, onProgress: (cur, tot, status) {
+                  // Only update text, don't flood progress bar to avoid jitter
+                  currentStatus.value = "Empacotando [$studentName]: $cur/$tot";
+              });
+                
+              successCount++;
                
            } catch (e) {
               debugPrint("Error processing $studentName: $e");
@@ -585,16 +612,152 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       }
   }
 
+  void _handlePackProject(BuildContext context, WidgetRef ref) async {
+       final state = ref.read(projectProvider);
+       if (state.project.pages.isEmpty && state.project.allImagePaths.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto vazio!")));
+          return;
+       }
+       
+       String? outputFile = await FilePicker.platform.saveFile(
+          dialogTitle: 'Salvar Pacote Smart Preview',
+          fileName: '${state.project.name}.alem',
+          allowedExtensions: ['alem'],
+          type: FileType.custom,
+       );
+       
+       if (outputFile == null) return;
+       if (!outputFile.toLowerCase().endsWith('.alem')) {
+          outputFile += '.alem';
+       }
+       
+       // Show Progress
+       ValueNotifier<double> progress = ValueNotifier(0);
+       ValueNotifier<String> status = ValueNotifier("Iniciando...");
+       
+       showDialog(
+         context: context, 
+         barrierDismissible: false,
+         builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF2C2C2C),
+            content: Column(
+               mainAxisSize: MainAxisSize.min,
+               children: [
+                  const CircularProgressIndicator(color: Colors.amberAccent),
+                  const SizedBox(height: 16),
+                  ValueListenableBuilder<String>(
+                     valueListenable: status, 
+                     builder: (c, val, _) => Text(val, style: const TextStyle(color: Colors.white), textAlign: TextAlign.center)
+                  ),
+                  const SizedBox(height: 8),
+                  ValueListenableBuilder<double>(
+                     valueListenable: progress,
+                     builder: (c, val, _) => LinearProgressIndicator(value: val, backgroundColor: Colors.white10),
+                  )
+               ],
+            ),
+         )
+       );
+       
+       try {
+          await ProjectPackager.packProject(state.project, outputFile, onProgress: (cur, tot, msg) {
+              if (tot > 0) progress.value = cur / tot;
+              status.value = msg;
+          });
+          
+          if (mounted) {
+             Navigator.pop(context);
+             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Projeto empacotado com sucesso em $outputFile")));
+          }
+       } catch (e) {
+          if (mounted) {
+             Navigator.pop(context);
+             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erro ao empacotar: $e")));
+          }
+       }
+  }
+
+  void _showBatchEditor(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (context) => const BatchEditorView())
+    );
+  }
+
   Widget _buildToolbar(BuildContext context, WidgetRef ref, bool canUndo, bool canRedo) {
     return Container(
       height: 50,
-      decoration: BoxDecoration(
-        color: const Color(0xFF000000), // Deep black toolbar
+      decoration: const BoxDecoration(
+        color: Color(0xFF000000), 
         border: Border(bottom: BorderSide(color: Color(0xFF262626))),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
+      padding: const EdgeInsets.symmetric(horizontal: 0), // MenuBar has its own padding
+      child: Row( // Use a Row to combine MenuBar and IconButtons
         children: [
+          MenuBar(
+              style: MenuStyle(
+                 backgroundColor: MaterialStateProperty.all(Colors.transparent),
+                 elevation: MaterialStateProperty.all(0),
+                 padding: MaterialStateProperty.all(const EdgeInsets.symmetric(horizontal: 8)),
+              ),
+              children: [
+                 SubmenuButton(
+                   menuChildren: [
+                     MenuItemButton(
+                        onPressed: () => _showNewProjectDialog(context, ref),
+                        shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true),
+                        child: const MenuAcceleratorLabel("&Novo Projeto..."),
+                     ),
+                     MenuItemButton(
+                        onPressed: () => _handleLoad(context, ref), // Corrected method name
+                        shortcut: const SingleActivator(LogicalKeyboardKey.keyO, control: true),
+                        child: const MenuAcceleratorLabel("&Abrir..."),
+                     ),
+                     MenuItemButton(
+                        onPressed: () => _handleSave(context, ref),
+                        shortcut: const SingleActivator(LogicalKeyboardKey.keyS, control: true),
+                        child: const MenuAcceleratorLabel("&Salvar"),
+                     ),
+                     MenuItemButton(
+                        onPressed: () => _handleSaveAs(context, ref),
+                        shortcut: const SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true),
+                        child: const MenuAcceleratorLabel("Sa&lvar Como..."),
+                     ),
+                     const Divider(),
+                     MenuItemButton(
+                        onPressed: () => _handlePackProject(context, ref),
+                        child: const MenuAcceleratorLabel("&Empacotar Projeto (Smart Preview)..."),
+                     ),
+                     const Divider(),
+                     SubmenuButton( // Nested submenu for Exports
+                        menuChildren: [
+                           MenuItemButton(
+                              onPressed: () => _handleExportJpg(context, ref),
+                              child: const MenuAcceleratorLabel("&JPG (Todas as Páginas)"),
+                           ),
+                           MenuItemButton(
+                              onPressed: () => _handleExportPdf(context, ref),
+                              child: const MenuAcceleratorLabel("&PDF (Álbum Completo)"),
+                           ),
+                        ],
+                        child: const MenuAcceleratorLabel("&Exportar"),
+                     ),
+                     const Divider(),
+                     MenuItemButton(
+                        onPressed: () => _handleNewInstance(),
+                        shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true, shift: true),
+                        child: const MenuAcceleratorLabel("Nova &Janela"),
+                     ),
+                     MenuItemButton(
+                        onPressed: () => SystemNavigator.pop(),
+                        child: const MenuAcceleratorLabel("Sai&r"),
+                     ),
+                   ],
+                   child: const MenuAcceleratorLabel("&Arquivo"),
+                 ),
+                 // We can accept other menus here (Edit, View, etc.)
+              ],
+          ),
+          // The rest of the toolbar buttons
           IconButton(
              icon: const Icon(Icons.note_add_outlined, color: Colors.white70), 
              tooltip: "New Project",
@@ -690,9 +853,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
             icon: const Icon(Icons.construction, color: Colors.white70),
             tooltip: "Ferramentas",
             onSelected: (value) async {
-               if (value == 'batch_export') {
-                  _showBatchExportDialog(context);
-               } else if (value == 'auto_diagram') {
+                  if (value == 'batch_export') {
+                     _showBatchExportDialog(context);
+                  } else if (value == 'batch_editor') {
+                     _showBatchEditor(context);
+                  } else if (value == 'auto_diagram') {
                   _showAutoDiagrammingDialog(context);
                } else if (value == 'rapid_diagram') {
                   _showRapidDiagrammingDialog(context);
@@ -720,6 +885,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       Icon(Icons.drive_folder_upload, color: Colors.black54),
                       SizedBox(width: 8),
                       Flexible(child: Text('Exportação em Lote (Auto)')),
+                   ],
+                ),
+               ),
+               const PopupMenuItem<String>(
+                value: 'batch_editor',
+                child: Row(
+                   children: [
+                      Icon(Icons.grid_view, color: Colors.pinkAccent),
+                      SizedBox(width: 8),
+                      Flexible(child: Text('Editor em Lote (40k+)')),
                    ],
                 ),
                ),
@@ -1042,7 +1217,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         opacity: 0.7,
         child: SizedBox(
           width: 60, height: 60,
-          child: Image.file(File(asset.path), fit: BoxFit.contain),
+          child: SmartImage(path: asset.path, fit: BoxFit.contain),
         ),
       ),
       child: GestureDetector(
@@ -1085,7 +1260,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
               padding: const EdgeInsets.all(4),
               child: Column(
                 children: [
-                  Expanded(child: Image.file(File(asset.path), fit: BoxFit.contain)),
+                  Expanded(child: SmartImage(path: asset.path, fit: BoxFit.contain)),
                   const SizedBox(height: 2),
                   Text(
                     asset.type == AssetType.template ? "Template" : "Elemento",
@@ -1245,9 +1420,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
             },
             child: Focus(
               autofocus: true,
-              child: GridView.builder(
-                padding: const EdgeInsets.all(8),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              child: Scrollbar(
+                controller: _browserScrollCtrl,
+                thumbVisibility: true,
+                thickness: 12,
+                radius: const Radius.circular(6),
+                interactive: true,
+                child: GridView.builder(
+                  controller: _browserScrollCtrl,
+                  padding: const EdgeInsets.all(8),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 3,
                   crossAxisSpacing: 4,
                   mainAxisSpacing: 4,
@@ -1265,7 +1447,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       opacity: 0.7,
                       child: SizedBox(
                         width: 60, height: 60,
-                        child: RotatedBox(quarterTurns: rot ~/ 90, child: Image.file(File(path), key: ValueKey('${path}_$version'), fit: BoxFit.contain)),
+                        child: RotatedBox(quarterTurns: rot ~/ 90, child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain)),
                       ),
                     ),
                     child: GestureDetector(
@@ -1301,7 +1483,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                             child: Center(
                               child: RotatedBox(
                                 quarterTurns: rot ~/ 90,
-                                child: Image.file(File(path), key: ValueKey('${path}_$version'), fit: BoxFit.contain),
+                                child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain),
                               ),
                             ),
                           ),
@@ -1316,6 +1498,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                   );
                 },
               ),
+              ), // Scrollbar
             ),
           ),
         ),
@@ -1503,13 +1686,20 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                   ),
                 ),
                 Expanded(
-                  child: GridView.builder(
-                    padding: const EdgeInsets.all(8),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3, 
-                      crossAxisSpacing: 4, 
-                      mainAxisSpacing: 4
-                    ),
+                  child: Scrollbar(
+                    controller: _galleryScrollCtrl,
+                    thumbVisibility: true,
+                    thickness: 12,
+                    radius: const Radius.circular(6),
+                    interactive: true,
+                    child: GridView.builder(
+                      controller: _galleryScrollCtrl,
+                      padding: const EdgeInsets.all(8),
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3, 
+                        crossAxisSpacing: 4, 
+                        mainAxisSpacing: 4
+                      ),
                     itemCount: state.project.allImagePaths.length,
                     itemBuilder: (ctx, i) {
                       final path = state.project.allImagePaths[i];
@@ -1525,7 +1715,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                             width: 80, height: 80,
                             child: Transform.rotate(
                               angle: (math.pi / 180) * rotation,
-                              child: Image.file(File(path), fit: BoxFit.cover),
+                              child: SmartImage(path: path, fit: BoxFit.cover),
                             ),
                           ),
                         ),
@@ -1542,12 +1732,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                                 Positioned.fill(
                                   child: Transform.rotate(
                                     angle: (math.pi / 180) * rotation,
-                                    child: Image.file(
-                                      File(path),
+                                    child: SmartImage(
+                                      path: path,
                                       fit: BoxFit.cover,
-                                      color: usageCount > 0 ? Colors.black.withOpacity(0.5) : null,
-                                      colorBlendMode: usageCount > 0 ? BlendMode.darken : null,
-                                      errorBuilder: (_,__,___) => Container(color: Colors.red),
+                                      // Note: complex blending logic left out to simplify, or can be passed if needed
+                                      // For now, simpler SmartImage usage
                                     ),
                                   ),
                                 ),
@@ -1583,12 +1772,114 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       );
                     },
                   ),
+                  ), // Scrollbar
                 )
             ],
           ),
         )
       ],
     );
+  }
+
+  Widget _buildTouchControls(BuildContext context, WidgetRef ref, PhotoBookState state) {
+      if (state.project.pages.isEmpty) return const SizedBox.shrink();
+
+      final hasSelection = state.selectedPhotoId != null;
+      final copyAvailable = hasSelection;
+      final pasteAvailable = state.clipboardPhoto != null;
+
+      return GestureDetector(
+         onPanUpdate: (details) {
+            setState(() {
+               _toolbarPos += details.delta;
+            });
+         },
+         child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+               color: const Color(0xFF2C2C2C).withOpacity(0.9),
+               borderRadius: BorderRadius.circular(30),
+               boxShadow: [
+                  BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 10, offset: const Offset(0, 4))
+               ],
+               border: Border.all(color: Colors.white10),
+            ),
+            child: Row(
+               mainAxisSize: MainAxisSize.min,
+               children: [
+                   // Precision Mode
+                   IconButton(
+                      icon: Icon(
+                         Icons.gps_fixed, // Target / Precision
+                         color: state.isPrecisionMode ? Colors.orangeAccent : Colors.white70
+                      ),
+                      tooltip: "Modo Precisão (Movimento Lento)",
+                      onPressed: () => ref.read(projectProvider.notifier).togglePrecisionMode(),
+                   ),
+                   const SizedBox(width: 8),
+                   Container(width: 1, height: 24, color: Colors.white24),
+                   const SizedBox(width: 8),
+
+                   // Multi-Select Toggle
+                   IconButton(
+                      icon: Icon(
+                         state.isTouchMultiSelectMode ? Icons.check_circle : Icons.check_circle_outline,
+                         color: state.isTouchMultiSelectMode ? Colors.greenAccent : Colors.white70
+                      ),
+                      tooltip: "Modo Seleção (Toque Múltiplo)",
+                      onPressed: () => ref.read(projectProvider.notifier).toggleTouchMultiSelect(),
+                   ),
+                   
+                   // Paste (Always visible if available, or if nothing selected)
+                   if (!hasSelection || pasteAvailable) ...[
+                       const SizedBox(width: 8),
+                       IconButton(
+                          icon: const Icon(Icons.paste, color: Colors.white70),
+                          tooltip: "Colar",
+                          onPressed: pasteAvailable ? () => ref.read(projectProvider.notifier).pastePhoto() : null, // Disabled if empty
+                       ),
+                   ],
+
+                   // Context Aware Tools (Only if Selection)
+                   if (hasSelection) ...[
+                       const SizedBox(width: 8),
+                       Container(width: 1, height: 24, color: Colors.white24),
+                       const SizedBox(width: 8),
+                       
+                       // Copy
+                       IconButton(
+                          icon: const Icon(Icons.copy, color: Colors.white70),
+                          tooltip: "Copiar",
+                          onPressed: () => ref.read(projectProvider.notifier).copySelectedPhoto(),
+                       ),
+                       
+                       // Front / Back
+                       IconButton(
+                          icon: const Icon(Icons.flip_to_front, color: Colors.white70),
+                          tooltip: "Trazer p/ Frente",
+                          onPressed: () => ref.read(projectProvider.notifier).bringToFront(state.selectedPhotoId!),
+                       ),
+                        IconButton(
+                          icon: const Icon(Icons.flip_to_back, color: Colors.white70),
+                          tooltip: "Enviar p/ Trás",
+                          onPressed: () => ref.read(projectProvider.notifier).sendToBack(state.selectedPhotoId!),
+                       ),
+                       
+                       const SizedBox(width: 8),
+                       Container(width: 1, height: 24, color: Colors.white24),
+                       const SizedBox(width: 8),
+                       
+                       // Delete
+                       IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.redAccent),
+                          tooltip: "Excluir Seleção",
+                          onPressed: () => _handleDelete(ref, state),
+                       ),
+                   ]
+               ],
+            ),
+         ),
+      );
   }
 
   Widget _buildCanvas(BuildContext context, WidgetRef ref, PhotoBookState state) {
@@ -1770,7 +2061,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       photo: photo,
       isSelected: isSelected,
       isEditingContent: isEditingContent,
-      isExporting: ref.watch(projectProvider).isExporting, // Pass global export flag
+
+      isExporting: ref.watch(projectProvider).isExporting, 
+      canvasScale: ref.watch(projectProvider).canvasScale, // Pass Scale for Sensitive Drag
+      isPrecisionMode: ref.watch(projectProvider).isPrecisionMode, // Pass Precision
       globalRotation: ref.watch(projectProvider).project.imageRotations[photo.path] ?? 0,
       onSelect: () {
          ref.read(projectProvider.notifier).selectPhoto(photo.id);
@@ -1821,11 +2115,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         ),
         const PopupMenuDivider(),
         PopupMenuItem(
-          child: const ListTile(leading: Icon(Icons.rotate_left, color: Colors.white, size: 18), title: Text("Rotacionar Esq (-90º)", style: TextStyle(color: Colors.white))),
+          child: const ListTile(leading: Icon(Icons.rotate_left, color: Colors.white, size: 18), title: Text("Rotacionar", style: TextStyle(color: Colors.white))),
           onTap: () => ref.read(projectProvider.notifier).rotatePagePhoto(photo.id, -90),
         ),
         PopupMenuItem(
-          child: const ListTile(leading: Icon(Icons.rotate_right, color: Colors.white, size: 18), title: Text("Rotacionar Dir (+90º)", style: TextStyle(color: Colors.white))),
+          child: const ListTile(leading: Icon(Icons.rotate_right, color: Colors.white, size: 18), title: Text("Rotacionar", style: TextStyle(color: Colors.white))),
           onTap: () => ref.read(projectProvider.notifier).rotatePagePhoto(photo.id, 90),
         ),
         const PopupMenuDivider(),
@@ -1956,92 +2250,128 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   Widget _buildThumbnails(WidgetRef ref, PhotoBookState state) {
   return Container(
     color: const Color(0xFF1E1E1E),
-    child: Scrollbar(
-      controller: _thumbScrollController,
-      thumbVisibility: true,
-    child: ReorderableListView.builder(
-        scrollController: _thumbScrollController,
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-        itemCount: state.project.pages.length,
-        buildDefaultDragHandles: false, // We use ReorderableDragStartListener
-        onReorder: (oldIndex, newIndex) {
-          ref.read(projectProvider.notifier).reorderPage(oldIndex, newIndex);
+    child: CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.delete, shift: true): () {
+            if (state.multiSelectedPages.isNotEmpty) {
+                ref.read(projectProvider.notifier).removeSelectedPages();
+            } else {
+                ref.read(projectProvider.notifier).removePage(state.project.currentPageIndex);
+            }
         },
-        itemBuilder: (context, index) {
-          final page = state.project.pages[index];
-          final isCurrent = state.project.currentPageIndex == index;
-          final isMultiSelected = state.multiSelectedPages.contains(index);
-          final isSelected = isCurrent || isMultiSelected;
-          
-          final double pageAspectRatio = page.widthMm / page.heightMm;
-          final double thumbHeight = 110.0;
-          final double thumbWidth = thumbHeight * pageAspectRatio;
-
-          return ReorderableDragStartListener(
-            index: index,
-            key: ValueKey(page.id),
-            child: GestureDetector(
-              onTap: () {
-                 final Set<LogicalKeyboardKey> pressed = HardwareKeyboard.instance.logicalKeysPressed;
-                 final isShift = pressed.contains(LogicalKeyboardKey.shiftLeft) || pressed.contains(LogicalKeyboardKey.shiftRight);
-                 final isCtrl = pressed.contains(LogicalKeyboardKey.controlLeft) || pressed.contains(LogicalKeyboardKey.controlRight);
-                 
-                 if (isShift) {
-                     ref.read(projectProvider.notifier).selectPageRange(state.project.currentPageIndex, index);
-                 } else if (isCtrl) {
-                     ref.read(projectProvider.notifier).togglePageSelection(index);
-                     // Also set as current if it's the only one?
-                     ref.read(projectProvider.notifier).setPageIndex(index);
-                 } else {
-                     // Standard click clears selection and sets current
-                     ref.read(projectProvider.notifier).clearPageSelection();
-                     ref.read(projectProvider.notifier).setPageIndex(index);
-                 }
-              },
-              onSecondaryTapUp: (details) {
-                   // Right click context menu
-                   if (!isSelected) {
-                       ref.read(projectProvider.notifier).setPageIndex(index);
-                       ref.read(projectProvider.notifier).clearPageSelection();
+      },
+      child: Focus(
+        autofocus: false,
+        child: Builder(
+          builder: (context) {
+            return Listener(
+            onPointerSignal: (event) {
+              if (event is PointerScrollEvent) {
+                // If vertical scroll (dy) is detected but no horizontal scroll (dx),
+                // map it to horizontal scroll for the timeline.
+                if (event.scrollDelta.dy != 0 && event.scrollDelta.dx == 0) {
+                   final double newOffset = _thumbScrollController.offset + event.scrollDelta.dy;
+                   if (newOffset >= _thumbScrollController.position.minScrollExtent &&
+                       newOffset <= _thumbScrollController.position.maxScrollExtent) {
+                       _thumbScrollController.jumpTo(newOffset);
                    }
-                   
-                   final multiCount = state.multiSelectedPages.length;
-                   final deleteLabel = multiCount > 1 ? "Excluir $multiCount Páginas" : "Excluir Página";
-                   
-                   showMenu(
-                     context: context,
-                     position: RelativeRect.fromLTRB(
-                       details.globalPosition.dx, 
-                       details.globalPosition.dy, 
-                       details.globalPosition.dx + 1, 
-                       details.globalPosition.dy + 1
-                     ),
-                     color: const Color(0xFF262626),
-                     items: [
-                       if (multiCount > 1) 
-                         PopupMenuItem(
-                           child: const ListTile(
-                             leading: Icon(Icons.merge_type, color: Colors.blueAccent, size: 18), 
-                             title: Text("Fundir Páginas", style: TextStyle(color: Colors.white))
+                }
+              }
+            },
+            child: Scrollbar(
+              controller: _thumbScrollController,
+              thumbVisibility: true,
+              thickness: 12, // Thicker for touch
+              radius: const Radius.circular(6),
+              interactive: true,
+              child: ReorderableListView.builder(
+              scrollController: _thumbScrollController,
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+              itemCount: state.project.pages.length,
+              buildDefaultDragHandles: false,
+              onReorder: (oldIndex, newIndex) => ref.read(projectProvider.notifier).reorderPage(oldIndex, newIndex),
+              itemBuilder: (context, index) {
+                final page = state.project.pages[index];
+                final isCurrent = state.project.currentPageIndex == index;
+                final isMultiSelected = state.multiSelectedPages.contains(index);
+                final isSelected = isCurrent || isMultiSelected;
+                
+                final double pageAspectRatio = page.widthMm / page.heightMm;
+                final double thumbHeight = 110.0;
+                final double thumbWidth = thumbHeight * pageAspectRatio;
+
+                return ReorderableDelayedDragStartListener(
+                  index: index,
+                  key: ValueKey(page.id),
+                  child: GestureDetector(
+                    onTap: () {
+                       // Request focus for Delete shortcut
+                       Focus.of(context).requestFocus();
+
+                       final Set<LogicalKeyboardKey> pressed = HardwareKeyboard.instance.logicalKeysPressed;
+                       final isShift = pressed.contains(LogicalKeyboardKey.shiftLeft) || pressed.contains(LogicalKeyboardKey.shiftRight);
+                       final isCtrl = pressed.contains(LogicalKeyboardKey.controlLeft) || pressed.contains(LogicalKeyboardKey.controlRight);
+                       
+                       if (isShift) {
+                           ref.read(projectProvider.notifier).selectPageRange(state.project.currentPageIndex, index);
+                       } else if (isCtrl) {
+                           // If starting multi-selection from a single selection, implicitly include the current page first
+                           if (state.multiSelectedPages.isEmpty) {
+                              ref.read(projectProvider.notifier).togglePageSelection(state.project.currentPageIndex);
+                           }
+                           ref.read(projectProvider.notifier).togglePageSelection(index);
+                           ref.read(projectProvider.notifier).setPageIndex(index);
+                       } else {
+                           // Standard click clears selection and sets current
+                           ref.read(projectProvider.notifier).clearPageSelection();
+                           ref.read(projectProvider.notifier).setPageIndex(index);
+                       }
+                    },
+                    onSecondaryTapUp: (details) {
+                         Focus.of(context).requestFocus();
+                         // Right click context menu
+                         if (!isSelected) {
+                             ref.read(projectProvider.notifier).setPageIndex(index);
+                             ref.read(projectProvider.notifier).clearPageSelection();
+                         }
+                         
+                         final multiCount = state.multiSelectedPages.length;
+                         final deleteLabel = multiCount > 1 ? "Excluir $multiCount Páginas" : "Excluir Página";
+                         
+                         showMenu(
+                           context: context,
+                           position: RelativeRect.fromLTRB(
+                             details.globalPosition.dx, 
+                             details.globalPosition.dy, 
+                             details.globalPosition.dx + 1, 
+                             details.globalPosition.dy + 1
                            ),
-                           onTap: () {
-                             ref.read(projectProvider.notifier).mergeSelectedPages();
-                           },
-                         ),
-                       PopupMenuItem(
-                         child: ListTile(leading: const Icon(Icons.delete, color: Colors.red, size: 18), title: Text(deleteLabel, style: const TextStyle(color: Colors.white))),
-                         onTap: () {
-                            if (multiCount > 1) {
-                                ref.read(projectProvider.notifier).removeSelectedPages();
-                            } else {
-                                ref.read(projectProvider.notifier).removePage(index);
-                            }
-                         },
-                       ),
-                     ]
-                   );
-              },
+                           color: const Color(0xFF262626),
+                           items: [
+                             if (multiCount > 1) 
+                               PopupMenuItem(
+                                 child: const ListTile(
+                                   leading: Icon(Icons.merge_type, color: Colors.blueAccent, size: 18), 
+                                   title: Text("Fundir Páginas", style: TextStyle(color: Colors.white))
+                                 ),
+                                 onTap: () {
+                                   ref.read(projectProvider.notifier).mergeSelectedPages();
+                                 },
+                               ),
+                             PopupMenuItem(
+                               child: ListTile(leading: const Icon(Icons.delete, color: Colors.red, size: 18), title: Text(deleteLabel, style: const TextStyle(color: Colors.white))),
+                               onTap: () {
+                                  if (multiCount > 1) {
+                                      ref.read(projectProvider.notifier).removeSelectedPages();
+                                  } else {
+                                      ref.read(projectProvider.notifier).removePage(index);
+                                  }
+                               },
+                             ),
+                           ]
+                         );
+                    },
               child: Container(
                 width: thumbWidth,
                 margin: const EdgeInsets.symmetric(horizontal: 6),
@@ -2101,9 +2431,14 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ),
         );
       },
-    ),
-    ),
-  );
+              )
+             )
+            );
+            },
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildMiniPagePreview(AlbumPage page) {
@@ -2126,7 +2461,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                   borderRadius: BorderRadius.circular(1),
                 ),
                 child: photo.path.isNotEmpty 
-                  ? Image.file(File(photo.path), fit: BoxFit.cover, errorBuilder: (_,__,___) => const SizedBox())
+                  ? SmartImage(path: photo.path)
                   : const SizedBox(),
               ),
             );
@@ -2135,6 +2470,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       },
     );
   }
+
+
 
   void _updateCanvasView(BuildContext context, WidgetRef ref, PhotoBookState state, {double? overrideScale}) {
     if (state.project.pages.isEmpty) return;
@@ -2207,8 +2544,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   Future<void> _handleSaveAs(BuildContext context, WidgetRef ref) async {
     final result = await FilePicker.platform.saveFile(
       dialogTitle: "Salvar Como",
-      fileName: "album_project.alem",
-      allowedExtensions: ['alem'],
+      fileName: "album_smart_preview.alem",
+      allowedExtensions: ['alem', 'json'],
+      type: FileType.custom,
     );
     if (result != null) {
       await ref.read(projectProvider.notifier).saveProject(result);
@@ -2253,12 +2591,21 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   Future<void> _handleLoad(BuildContext context, WidgetRef ref) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: ['alem'],
+      allowedExtensions: ['alem', 'json'],
     );
     if (result != null && result.files.single.path != null) {
-      await ref.read(projectProvider.notifier).loadProject(result.files.single.path!);
+      final success = await ref.read(projectProvider.notifier).loadProject(result.files.single.path!);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto carregado!")));
+        if (success) {
+           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto carregado com sucesso!")));
+        } else {
+           ScaffoldMessenger.of(context).showSnackBar(
+             SnackBar(
+               content: const Text("Erro ao carregar projeto! Verifique o arquivo."), 
+               backgroundColor: Colors.redAccent.shade700
+             )
+           );
+        }
       }
     }
   }
@@ -3188,3 +3535,5 @@ class _NewProjectDialogState extends State<_NewProjectDialog> {
     );
   }
 }
+
+

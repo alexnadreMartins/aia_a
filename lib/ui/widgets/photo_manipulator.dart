@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/project_model.dart';
 import '../../logic/image_loader.dart';
 import '../../logic/cache_provider.dart';
+import '../../state/project_state.dart';
 
 class PhotoManipulator extends ConsumerStatefulWidget {
   final PhotoItem photo;
@@ -22,7 +23,9 @@ class PhotoManipulator extends ConsumerStatefulWidget {
   final VoidCallback? onDoubleTap;
   final int globalRotation;
   final Function(Offset)? onContextMenu;
-  final bool isExporting; // NEW
+  final bool isExporting;
+  final double canvasScale;
+  final bool isPrecisionMode; // NEW
 
   const PhotoManipulator({
     super.key,
@@ -35,7 +38,9 @@ class PhotoManipulator extends ConsumerStatefulWidget {
     this.onDoubleTap,
     this.globalRotation = 0,
     this.onContextMenu,
-    this.isExporting = false, // NEW
+    this.isExporting = false,
+    required this.canvasScale,
+    this.isPrecisionMode = false, // NEW
   });
 
   @override
@@ -45,6 +50,7 @@ class PhotoManipulator extends ConsumerStatefulWidget {
 class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
   ui.Image? _uiImage;
   String? _lastPath;
+  bool _isProxy = false; // NEW
 
   @override
   void initState() {
@@ -65,12 +71,33 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
       if (mounted) setState(() => _uiImage = null);
       return;
     }
+    
+    String loadPath = widget.photo.path;
+    bool usingProxy = false;
+    
+    // Check Existence / Offline Mode Logic
+    final file = File(loadPath);
+    if (!await file.exists()) {
+        // Try Proxy
+        final projectState = ref.read(projectProvider);
+        if (projectState.proxyRoot != null) {
+            final filename = loadPath.split(Platform.pathSeparator).last;
+            final proxyPath = '${projectState.proxyRoot}${Platform.pathSeparator}$filename';
+            if (await File(proxyPath).exists()) {
+                debugPrint("Using Proxy for $filename");
+                loadPath = proxyPath;
+                usingProxy = true;
+            }
+        }
+    }
+
     try {
-      final img = await ImageLoader.loadImage(widget.photo.path);
+      final img = await ImageLoader.loadImage(loadPath);
       if (mounted) {
         setState(() {
           _uiImage = img;
           _lastPath = widget.photo.path;
+          _isProxy = usingProxy;
         });
       }
     } catch (e) {
@@ -84,7 +111,7 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
 
   @override
   Widget build(BuildContext context) {
-    // Listen for external updates (e.g. from Editor Save)
+    // Listen for external updates
     ref.listen(imageVersionProvider(widget.photo.path), (prev, next) {
        _loadImage();
     });
@@ -92,71 +119,136 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
     final photo = widget.photo;
     final angle = photo.rotation * (math.pi / 180);
 
+    // Draggable / Swap Logic
     return Positioned(
       left: photo.x,
       top: photo.y,
       child: Transform.rotate(
         angle: angle,
         alignment: Alignment.topLeft,
-        child: AnimatedScale(
-          scale: _isMoving ? 1.05 : 1.0,
-          duration: const Duration(milliseconds: 100),
-          child: GestureDetector(
-          onTap: widget.onSelect,
-          onDoubleTap: widget.onDoubleTap,
-          onSecondaryTapDown: (details) {
-            if (widget.onContextMenu != null) {
-              widget.onContextMenu!(details.localPosition);
-            }
+        child: DragTarget<String>(
+          onWillAccept: (data) => data != null && data != photo.id, // Don't swap with self
+          onAccept: (receivedId) {
+             ref.read(projectProvider.notifier).swapPhotos(receivedId, photo.id);
           },
-            onPanStart: (details) {
-              if (!widget.isSelected || widget.isEditingContent) return;
-              // Hit test handles manually
-              final localPos = details.localPosition;
-              _activeHandle = _hitTestHandles(localPos, Size(photo.width, photo.height));
-              if (_activeHandle == null) {
-                setState(() => _isMoving = true);
-              }
-            },
-          onPanUpdate: (details) {
+          builder: (context, candidateData, rejectedData) {
+            final isHovered = candidateData.isNotEmpty;
+
+            return LongPressDraggable<String>(
+              data: photo.id,
+              delay: const Duration(seconds: 2), // 2 Seconds Delay as requested
+              feedback: Material(
+                 elevation: 8,
+                 color: Colors.transparent,
+                 child: Opacity(
+                   opacity: 0.8,
+                   child: SizedBox(
+                      width: 150, 
+                      height: 150, // Fixed thumb size for feedback
+                      child: _uiImage == null 
+                         ? const Icon(Icons.photo, size: 50, color: Colors.white)
+                         : RawImage(image: _uiImage, fit: BoxFit.cover),
+                   ),
+                 ),
+              ),
+              childWhenDragging: Opacity(opacity: 0.5, child: _buildContent(photo, angle, isHovered)),
+              child: _buildContent(photo, angle, isHovered),
+            );
+          }
+        ),
+      ),
+    );
+  }
+
+  Widget _buildContent(PhotoItem photo, double angle, bool isHovered) {
+    return AnimatedScale(
+      scale: _isMoving ? 1.05 : 1.0,
+      duration: const Duration(milliseconds: 100),
+      child: GestureDetector(
+        onTap: widget.onSelect,
+        onDoubleTap: widget.onDoubleTap,
+        onSecondaryTapDown: (details) {
+          if (widget.onContextMenu != null) {
+            widget.onContextMenu!(details.localPosition);
+          }
+        },
+        onPanStart: (details) {
+          if (!widget.isSelected || widget.isEditingContent) return;
+          final localPos = details.localPosition;
+          _activeHandle = _hitTestHandles(localPos, Size(photo.width, photo.height));
+          if (_activeHandle == null) {
+            setState(() => _isMoving = true);
+          }
+        },
+        onPanUpdate: (details) {
+            // Apply Scale Correction: Divide delta by canvasScale
+            double dx = details.delta.dx / widget.canvasScale;
+            double dy = details.delta.dy / widget.canvasScale;
+            
+            // Precision Mode Damping
+            if (widget.isPrecisionMode) {
+               dx *= 0.1; // 10x Slower
+               dy *= 0.1;
+            }
+
             if (widget.isEditingContent) {
-              // Pan Image Inside Frame
-              final dAlignX = details.delta.dx / (photo.width / 2);
-              final dAlignY = details.delta.dy / (photo.height / 2);
+              // Pan Image Inside Frame - Content pan is also scaled?
+              // YES, because if I move mouse 100px, I expect content to move 100px relative to frame?
+              // Actually, contentX is normalized (-1 to 1?). No, logic is `dAlignX = dx / (width/2)`.
+              // width inside here is logical width. `dx` should be scaled to match logical width.
+              // So yes, dx must be divided by scale.
+              
+              final dAlignX = dx / (photo.width / 2);
+              final dAlignY = dy / (photo.height / 2);
               widget.onUpdate(photo.copyWith(
                 contentX: (photo.contentX - dAlignX).clamp(-5.0, 5.0),
                 contentY: (photo.contentY - dAlignY).clamp(-5.0, 5.0),
               ));
             } else if (_activeHandle == const Alignment(0, -2)) {
-              // Rotate Frame
-              final center = Offset(photo.width / 2, photo.height / 2);
-              final currentPos = details.localPosition;
+               // Rotation logic... mostly based on position, not delta, but we use `localPosition`.
+               // `localPosition` is ALREADY scaled by Flutter's Transform? No.
+               // Verify: InteractiveViewer scales the canvas.
+               // GestureDetector receives coordinates in local system?
+               // If InteractiveViewer scales, the coordinates provided by GestureDetector ARE local to the widget size?
+               // IF GestureDetector sees "width 300", and I drag halfway, it sees 150.
+               // Wait. If `InteractiveViewer` is used, `details.delta` reported by GestureDetector IS usually unscaled (screen pixels).
+               // SO dividing by scale corrects it.
+               // Rotation uses `localPosition`. does `localPosition` need scaling?
+               // `localPosition` is typically correct relative to the widget box.
+               // So Rotation calculation based on atan2 of localPosition should remain VALID.
+               
+               final center = Offset(photo.width / 2, photo.height / 2);
+               final currentPos = details.localPosition; // Do we need to scale this?
+               // If I click at 100px (screen), but scale is 2.0, is localPosition 50 or 100?
+               // In scaled view, localPosition is usually in the transformed space. 
+               // I'll stick to NOT scaling localPosition for rotation (absolute positions) but scaling Delta.
+
               final angle = math.atan2(currentPos.dy - center.dy, currentPos.dx - center.dx);
-              // convert to degrees and add 90 because handle is at top
               double deg = angle * (180 / math.pi) + 90;
               widget.onUpdate(photo.copyWith(rotation: deg % 360));
+              
             } else if (_activeHandle != null) {
               // Resize Frame
-              _handleResize(photo, details.delta, _activeHandle!, _isCorner(_activeHandle!));
+              _handleResize(photo, Offset(dx, dy), _activeHandle!, _isCorner(_activeHandle!));
             } else if (widget.isSelected) {
               // Move Frame
-              // We need to rotate the local delta back to global page coordinates 
-              // because the GestureDetector is inside Transform.rotate
-              final globalDelta = _rotateVector(details.delta, angle);
+              final globalDelta = _rotateVector(Offset(dx, dy), angle);
               widget.onUpdate(photo.copyWith(
                 x: photo.x + globalDelta.dx,
                 y: photo.y + globalDelta.dy,
               ));
             }
-          },
-            onPanEnd: (_) {
-              _activeHandle = null;
-              if (_isMoving) {
-                setState(() => _isMoving = false);
-              }
-              widget.onDragEnd();
-            },
-          child: CustomPaint(
+        },
+        onPanEnd: (_) {
+          _activeHandle = null;
+          if (_isMoving) setState(() => _isMoving = false);
+          widget.onDragEnd();
+        },
+        child: Container( // Wrap in Container to show Hover Border
+           decoration: isHovered 
+              ? BoxDecoration(border: Border.all(color: Colors.greenAccent, width: 4))
+              : null,
+           child: CustomPaint(
             size: Size(photo.width, photo.height),
             painter: PhotoPainter(
               image: _uiImage,
@@ -164,9 +256,9 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
               isSelected: widget.isSelected,
               isEditingContent: widget.isEditingContent,
               globalRotation: widget.globalRotation,
-              isExporting: widget.isExporting, // NEW
+              isExporting: widget.isExporting,
+              isProxy: _isProxy,
             ),
-          ),
           ),
         ),
       ),
@@ -263,6 +355,7 @@ class PhotoPainter extends CustomPainter {
   final bool isEditingContent;
   final int globalRotation;
   final bool isExporting; // NEW
+  final bool isProxy; // NEW
 
   PhotoPainter({
     required this.image,
@@ -271,6 +364,7 @@ class PhotoPainter extends CustomPainter {
     required this.isEditingContent,
     this.globalRotation = 0,
     this.isExporting = false, // NEW
+    this.isProxy = false, // NEW
   });
 
   @override
@@ -340,6 +434,11 @@ class PhotoPainter extends CustomPainter {
       _drawPlaceholderIcons(canvas, size);
     } else {
       _drawImage(canvas, size, paint);
+      
+      // Draw Proxy Indicator (Offline Mode)
+      if (isProxy && !isExporting) {
+         _drawProxyIndicator(canvas, size);
+      }
     }
 
     if (isSelected && !isExporting) { // CHECK EXPORT FLAG
@@ -362,6 +461,34 @@ class PhotoPainter extends CustomPainter {
           canvas.drawRect(Offset.zero & size, paint);
        }
     }
+  }
+
+  void _drawProxyIndicator(Canvas canvas, Size size) {
+      // Draw a small "Cloud Off" icon in top-right corner
+      final iconSize = 24.0;
+      final padding = 4.0;
+      
+      final bgRect = Rect.fromLTWH(size.width - iconSize - padding * 2, 0, iconSize + padding * 2, iconSize + padding * 2);
+      
+      // Background for contrast
+      final paint = Paint()..color = Colors.black.withOpacity(0.5);
+      final path = Path()..moveTo(bgRect.left, 0)..lineTo(bgRect.right, 0)..lineTo(bgRect.right, bgRect.bottom)..lineTo(bgRect.left + 10, bgRect.bottom)..close(); 
+      // Simple corner triangle or box? Box is safer.
+      canvas.drawRect(Rect.fromLTWH(size.width - 24, 0, 24, 24), paint);
+
+      final tp = TextPainter(
+        text: TextSpan(
+          text: String.fromCharCode(Icons.cloud_off.codePoint),
+          style: TextStyle(
+            fontSize: 16,
+            fontFamily: Icons.cloud_off.fontFamily,
+            color: Colors.white,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      tp.layout();
+      tp.paint(canvas, Offset(size.width - 20, 4));
   }
 
   void _drawImage(Canvas canvas, Size size, Paint paint) {

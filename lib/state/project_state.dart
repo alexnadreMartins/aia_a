@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:convert';
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import '../models/project_model.dart';
 import '../logic/template_system.dart';
@@ -15,6 +16,8 @@ import '../logic/auto_select_engine.dart';
 import 'package:image/image.dart' as img; // For Rotation
 import '../logic/cache_provider.dart'; // For Cache Utils
 import 'package:path/path.dart' as p;
+import 'package:archive/archive_io.dart'; // ZIP Support
+import '../logic/project_packager.dart';
 
 
 
@@ -36,11 +39,15 @@ class PhotoBookState {
   final PhotoItem? clipboardPhoto;
   final double canvasScale;
   final String? currentProjectPath;
+
   final Set<int> multiSelectedPages;
+  final bool isTouchMultiSelectMode;
+  final bool isPrecisionMode; // NEW
   
   // New Browser Fields
   final BrowserSortType browserSortType;
   final BrowserFilterType browserFilterType;
+  final String? proxyRoot; // Path to unzipped proxies (if loaded from package)
 
   PhotoBookState({
     required this.project,
@@ -55,8 +62,11 @@ class PhotoBookState {
     this.canvasScale = 1.0,
     this.currentProjectPath,
     this.multiSelectedPages = const {},
+    this.isTouchMultiSelectMode = false,
+    this.isPrecisionMode = false,
     this.browserSortType = BrowserSortType.name,
     this.browserFilterType = BrowserFilterType.all,
+    this.proxyRoot,
   });
 
   PhotoBookState copyWith({
@@ -73,7 +83,10 @@ class PhotoBookState {
     String? currentProjectPath,
     Set<int>? multiSelectedPages,
     BrowserSortType? browserSortType,
+    bool? isTouchMultiSelectMode,
+    bool? isPrecisionMode,
     BrowserFilterType? browserFilterType,
+    String? proxyRoot,
   }) {
     return PhotoBookState(
       project: project ?? this.project,
@@ -88,8 +101,11 @@ class PhotoBookState {
       canvasScale: canvasScale ?? this.canvasScale,
       currentProjectPath: currentProjectPath ?? this.currentProjectPath,
       multiSelectedPages: multiSelectedPages ?? this.multiSelectedPages,
+      isTouchMultiSelectMode: isTouchMultiSelectMode ?? this.isTouchMultiSelectMode,
+      isPrecisionMode: isPrecisionMode ?? this.isPrecisionMode,
       browserSortType: browserSortType ?? this.browserSortType,
       browserFilterType: browserFilterType ?? this.browserFilterType,
+      proxyRoot: proxyRoot ?? this.proxyRoot,
     );
   }
 
@@ -120,6 +136,14 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
        return;
      }
      state = state.copyWith(isEditingContent: isEditing);
+  }
+
+  void toggleTouchMultiSelect() {
+     state = state.copyWith(isTouchMultiSelectMode: !state.isTouchMultiSelectMode);
+  }
+
+  void togglePrecisionMode() {
+     state = state.copyWith(isPrecisionMode: !state.isPrecisionMode);
   }
 
   void setIsExporting(bool check) {
@@ -213,7 +237,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   }
 
   void setCanvasScale(double scale) {
-    state = state.copyWith(canvasScale: scale.clamp(0.1, 5.0));
+    state = state.copyWith(canvasScale: scale.clamp(0.01, 20.0));
   }
 
   void updateCanvasScale(double delta) {
@@ -223,97 +247,240 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   Future<void> rotateSelectedGalleryPhotos(int degrees) async {
     if (state.selectedBrowserPaths.isEmpty) return;
     
-    // Optimistic Logic? No, user wants file persistence.
-    // We will process files then update state to force reload.
-    // This might be slow for many photos, but it's safe.
-    
     final paths = state.selectedBrowserPaths.toList();
     
-    // Show some global loading indicator? 
-    // Ideally we'd use a separate state for 'processing', but for now we await.
-    
-    for (var path in paths) {
-      await _rotateFile(path, degrees);
-    }
-    
-    // Force Re-read of state? Or just update rotations map (reset to 0)
+    // 1. Optimistic UI Update matches user expectation "works offline"
+    // We update the visual state immediately.
     final newRotations = Map<String, int>.from(state.project.imageRotations);
     for (var path in paths) {
-       newRotations[path] = 0; // Reset visual rotation since file is rotated
+       final current = newRotations[path] ?? 0;
+       // Add rotation (ensure 0-360 normalization)
+       newRotations[path] = (current + degrees) % 360;
     }
 
     state = state.copyWith(
       project: state.project.copyWith(imageRotations: newRotations)
     );
+
+    // 2. Background Process (Sync Later)
+    // We do NOT await this to block UI. 
+    // Ideally we might want a queue, but simply unawaited async serves the "offline" requirement 
+    // as it won't freeze the app if disk is slow/unavailable.
+    Future.microtask(() async {
+        for (var path in paths) {
+           await _rotateFile(path, degrees);
+           // After successful write, we MIGHT reset the visual rotation if we wanted to reload the file.
+           // BUT: The user experience is smoother if we just keep the rotation value 
+           // until the next reload. 
+           // However, `_rotateFile` overwrites the bits. 
+           // If we overwrite bits, we should eventually reset the `imageRotations` to 0 
+           // so we don't double-rotate on reload.
+           // CHALLENGE: If we reset to 0 later, the user sees a jump.
+           // BETTER: Update the `imageRotations` to 0 ONLY when we confirm the file is reloaded/cached.
+           // For now, let's Stick to: Update Map, Write File. 
+           // Issue: If we write file, next time we load it, it's rotated. 
+           // If we also store "90" in map, we see 90+90 = 180.
+           // FIX: We need to reset the map to 0 AFTER the file is safely written and we trigger a reload.
+           // OR: We just don't write to the file until export? No, user wants it saved.
+           
+           // Correct Approach for "Offline":
+           // 1. UI sets rotation to +90. User sees +90.
+           // 2. Background tries to write file. 
+           // 3. If success: Write file, THEN update state to set rotation back to 0 (and reload image).
+           // This causes a "flicker".
+           // ALTERNATIVE: Don't modify the file bits! Just store metadata!
+           // User specifically said "rotacionar no modo offline para syncronizar depois".
+           // This implies they want the ACTION to be queued.
+           // Modifying bits is destructive and slow. 
+           // IF the legacy app modified bits, we should stick to it OR changing to Metadata-only is better?
+           // `_rotateFile` does `img.copyRotate`, which IS modifying bits.
+           
+           // PROPOSED FIX:
+           // Keep the Optimistic Rotation in `imageRotations` (Metadata).
+           // TRY to write the file in background.
+           // IF successful, THEN reset metadata to 0.
+           // IF fails (offline), keep metadata. 
+           // Next time app opens, it sees metadata +90.
+           // Checks file. If file is original, applies +90 on view.
+           // We need a "Sync" process that runs on startup/connection to apply pending rotations?
+           
+           // Implementation for NOW (Quick Fix):
+           // Just keep the metadata rotation!
+           // Don't modify the file immediately if it blocks? 
+           // Actually, `_rotateFile` is what they want "synced later".
+           // So:
+           // 1. Update State (Rotation += 90).
+           // 2. Background: Rotate File. 
+           // 3. If Success -> Update State (Rotation -= 90, i.e. back to 0), Invalidate Cache.
+           
+           await _safeRotateInBackground(path, degrees);
+        }
+    });
   }
 
   Future<void> rotateGalleryPhoto(String path, int degrees) async {
-    await _rotateFile(path, degrees);
-    
+    // Optimistic Update
     final newRotations = Map<String, int>.from(state.project.imageRotations);
-    newRotations[path] = 0; // Reset visual rotation
+    newRotations[path] = (newRotations[path] ?? 0) + degrees;
     
     state = state.copyWith(
-      project: state.project.copyWith(imageRotations: newRotations)
+       project: state.project.copyWith(imageRotations: newRotations)
     );
+    
+    // Background execution
+    _safeRotateInBackground(path, degrees);
   }
   
-  void rotatePagePhoto(String photoId, double deltaDegrees) {
-      _saveStateToHistory();
-      final newPages = state.project.pages.map((page) {
-          int index = page.photos.indexWhere((p) => p.id == photoId);
-          if (index == -1) return page;
-          
-          final newPhotos = List<PhotoItem>.from(page.photos);
-          final current = newPhotos[index];
-          // Determine new rotation (snap to 90?)
-          // If user wants 90 degree steps:
-          double newRot = current.rotation + deltaDegrees;
-          // Normalize to 0-360 if desired, but Flutter rotation is usually radians or degrees.
-          // PhotoItem uses degrees based on usage in rotateGalleryPhoto logic (passed as int degrees).
-          // But PhotoItem.rotation is double.
-          // Let's keep it cumulative.
-          
-          newPhotos[index] = current.copyWith(rotation: newRot);
-          return page.copyWith(photos: newPhotos);
-      }).toList();
-      
-      state = state.copyWith(project: state.project.copyWith(pages: newPages));
+  Future<void> rotatePagePhoto(String photoId, double deltaDegrees) async {
+       // 1. Find the photo path
+       String? path;
+       PhotoItem? targetPhoto;
+       
+       for (var page in state.project.pages) {
+          try {
+             targetPhoto = page.photos.firstWhere((p) => p.id == photoId);
+             path = targetPhoto.path;
+             break;
+          } catch (_) {}
+       }
+       
+       if (path == null || path.isEmpty || targetPhoto == null) return;
+
+       // 2. Optimistic UI Update (Metadata Rotation)
+       // We update the PhotoItem rotation momentarily OR validly?
+       // The original code rotated the FILE and reset the Item rotation to 0.
+       // We will simulate that by checking if we can rotate the item visually first.
+       
+       _saveStateToHistory();
+       
+       // Apply visual rotation immediately
+       final newPages = state.project.pages.map((page) {
+           if (!page.photos.any((p) => p.id == photoId)) return page;
+           final newPhotos = page.photos.map((p) {
+               if (p.id == photoId) {
+                   return p.copyWith(rotation: p.rotation + deltaDegrees);
+               }
+               return p;
+           }).toList();
+           return page.copyWith(photos: newPhotos);
+       }).toList();
+       
+       state = state.copyWith(project: state.project.copyWith(pages: newPages));
+
+       // 3. Background Sync
+       // We want to rotate the file, and ON SUCCESS, reset the visual rotation to 0.
+       // Only rotate file if it's 90 degree increments.
+       if (deltaDegrees % 90 == 0) {
+            _safeRotateInBackground(path, deltaDegrees.toInt(), resetPhotoId: photoId);
+       }
+       
+  }
+  Future<void> _safeRotateInBackground(String path, int degrees, {String? resetPhotoId}) async {
+      try {
+           final file = File(path);
+           if (!await file.exists()) {
+               // Offline / Missing
+               debugPrint("File $path not found for rotation (Offline). Pending sync...");
+               // In a real sync system, queue this. For now, we just leave the Metadata rotation in place!
+               // This fulfils "offline mode" -> User sees rotation (stored in metadata/state), file is untouched.
+               // When they come online or reload, if file is still not rotated, they see metadata rotation.
+               return;
+           }
+
+           // Perform Rotation
+           await _rotateFile(path, degrees);
+           
+           // ON SUCCESS:
+           // We need to revert the metadata rotation we applied optimistically, 
+           // because now the bits are rotated.
+           
+           // 1. Update Browser Rotations (Set back to 0)
+           final currentRot = state.project.imageRotations[path] ?? 0;
+           // The state might have changed since we started!
+           // But generally: if we rotated file by 'degrees', we subtract 'degrees' from visual.
+           final newRot = (currentRot - degrees) % 360;
+           final newRotations = Map<String, int>.from(state.project.imageRotations);
+           newRotations[path] = newRot; // Usually 0
+           
+           // 2. Update Page Photos (Set back to 0 if we passed an ID)
+           List<AlbumPage> newPages = state.project.pages;
+           if (resetPhotoId != null) {
+               newPages = state.project.pages.map((page) {
+                   if (!page.photos.any((p) => p.id == resetPhotoId)) return page;
+                   return page.copyWith(photos: page.photos.map((p) {
+                       if (p.id == resetPhotoId) {
+                           return p.copyWith(rotation: 0); // Reset to 0 as bits are rotated
+                       }
+                       /// WARNING: Should we update ALL instances of this path?
+                       /// User said "no arquivo".
+                       /// The original logic updated all. 
+                       /// If `resetPhotoId` is passed, we target one. 
+                       /// But really we should find ALL photos with this path and decrement/reset their rotation?
+                       if (p.path == path) {
+                           return p.copyWith(rotation: 0);
+                       }
+                       return p;
+                   }).toList());
+               }).toList();
+           } else {
+               // Browser rotation affected all instances?
+               // If we rotate via Browser, we probably want to reset all consumers too.
+                newPages = state.project.pages.map((page) {
+                   bool varied = false;
+                   final newPhotos = page.photos.map((p) {
+                       if (p.path == path) {
+                           varied = true;
+                           return p.copyWith(rotation: 0); 
+                       }
+                       return p;
+                   }).toList();
+                   if (varied) return page.copyWith(photos: newPhotos);
+                   return page;
+               }).toList();
+           }
+
+           state = state.copyWith(
+               project: state.project.copyWith(
+                   imageRotations: newRotations,
+                   pages: newPages
+               )
+           );
+           
+           // Cache Cleanup
+           CacheService.invalidate(ref, path);
+           ref.read(imageVersionProvider(path).notifier).state++;
+           
+      } catch (e) {
+          debugPrint("Rotation Background Error: $e");
+          // If failed, keep the metadata rotation so user still sees it!
+      }
   }
 
   Future<void> _rotateFile(String path, int degrees) async {
       try {
         final file = File(path);
-        if (!await file.exists()) return;
+        // Note: calling existSync or similar inside async method is ok, 
+        // but since we are in background, we can await.
+        if (!await file.exists()) throw Exception("File not found");
         
         final bytes = await file.readAsBytes();
         final image = img.decodeImage(bytes);
         if (image == null) return;
         
-        // img.copyRotate uses clockwise degrees?
-        // Note: Project uses standard degrees (90, -90).
-        // image package handles rotation.
-        
         final rotated = img.copyRotate(image, angle: degrees);
         
-        // Encode back to original format (assuming JPG for photos)
-        // If PNG, we should check extension.
         List<int> newBytes;
         if (path.toLowerCase().endsWith(".png")) {
            newBytes = img.encodePng(rotated);
         } else {
-           newBytes = img.encodeJpg(rotated, quality: 95); // High quality
+           newBytes = img.encodeJpg(rotated, quality: 95); 
         }
         
         await file.writeAsBytes(newBytes, flush: true);
         
-        // Invalidate Cache
-        // Using explicit specific method if available or Ref
-        ref.read(imageVersionProvider(path).notifier).state++;
-        CacheService.invalidate(ref, path); // Use helper
-        
       } catch (e) {
         debugPrint("Error rotating file $path: $e");
+        rethrow; // Propagate to let _safeRotateInBackground allow metadata persistence
       }
   }
 
@@ -1340,6 +1507,51 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   }
 
 
+  void swapPhotos(String id1, String id2) {
+      final pIdx = state.project.currentPageIndex;
+      if (pIdx < 0) return;
+      
+      final page = state.project.pages[pIdx];
+      final p1Index = page.photos.indexWhere((p) => p.id == id1);
+      final p2Index = page.photos.indexWhere((p) => p.id == id2);
+      
+      if (p1Index == -1 || p2Index == -1) return;
+      
+      _saveStateToHistory();
+      
+      final p1 = page.photos[p1Index];
+      final p2 = page.photos[p2Index];
+      
+      // Swap content (Path) but KEEP Frame properties (x, y, w, h, rotation)
+      // We also reset crop (contentX/Y/Scale) because the new image likely won't match the old crop perfectly
+      
+      final newP1 = p1.copyWith(
+         path: p2.path, 
+         contentX: 0, contentY: 0, contentScale: 1.0, 
+         // preserve existing frame rotation? Or should we swap image rotation?
+         // Frame rotation (p1.rotation) belongs to the layout.
+         // EXIF Orientation belongs to the image. It is read from file, effectively swapped.
+      );
+      
+      final newP2 = p2.copyWith(
+         path: p1.path,
+         contentX: 0, contentY: 0, contentScale: 1.0,
+      );
+      
+      final newPhotos = List<PhotoItem>.from(page.photos);
+      newPhotos[p1Index] = newP1;
+      newPhotos[p2Index] = newP2;
+      
+      state = state.copyWith(
+         project: state.project.copyWith(
+            pages: [
+               for (int i=0; i<state.project.pages.length; i++)
+                  if (i == pIdx) page.copyWith(photos: newPhotos) else state.project.pages[i]
+            ]
+         )
+      );
+  }
+
   // --- Auto-Group Verticals ---
   void groupConsecutiveVerticals() {
     _saveStateToHistory();
@@ -1775,25 +1987,90 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   }
 
   Future<void> saveProject(String path) async {
-
     try {
-      final jsonStr = jsonEncode(state.project.toJson());
-      await File(path).writeAsString(jsonStr);
+      if (path.toLowerCase().endsWith('.alem')) {
+          // Check if we are in "Offline/Proxy Mode" or simply have proxies available
+          if (state.proxyRoot != null && await Directory(state.proxyRoot!).exists()) {
+             debugPrint("Updating Smart Preview Package using existing proxies...");
+             await ProjectPackager.updatePackage(state.project, state.proxyRoot!, path, onProgress: (c, t, s) {
+                // Determine if we need to show progress? For quick saves usually we don't show dialog.
+                // But this operation might take a few seconds.
+                // Since this runs in async without UI feedback (unless we add it), we just log.
+                if (c % 10 == 0) debugPrint(s);
+             });
+          } else {
+             // Standard Full Pack (Resizing Originals)
+             debugPrint("Saving as Smart Preview Package (Full Repack)...");
+             await ProjectPackager.packProject(state.project, path);
+          }
+      } else {
+          // Standard JSON
+          final jsonStr = jsonEncode(state.project.toJson());
+          await File(path).writeAsString(jsonStr);
+      }
+
       state = state.copyWith(currentProjectPath: path);
+      _updateUndoRedoFlags(); // Just to refresh state if needed
       debugPrint("Project saved to $path");
     } catch (e) {
       debugPrint("Error saving project: $e");
     }
   }
 
-  Future<void> loadProject(String path) async {
+
+  Future<bool> loadProject(String path) async {
     try {
-      final jsonStr = await File(path).readAsString();
+      final file = File(path);
+      if (!await file.exists()) return false;
+
+      // Check Header for ZIP (PK..)
+      final bytes = await file.openRead(0, 2).first;
+      final isZip = bytes.length >= 2 && bytes[0] == 0x50 && bytes[1] == 0x4B;
+      
+      String jsonStr = "";
+      String? proxyRoot; 
+      
+      if (isZip) {
+           debugPrint("Detected Project Package (ZIP). Unpacking...");
+           final tempDir = await getTemporaryDirectory();
+           final unpackDir = Directory(p.join(tempDir.path, 'aia_session_${Uuid().v4()}'));
+           await unpackDir.create(recursive: true);
+           
+           // Workaround for extractFileToDisk requiring .zip extension
+           // We copy the .alem file to a temp .zip file
+           final tempZip = File(p.join(tempDir.path, 'temp_extract_${Uuid().v4()}.zip'));
+           await file.copy(tempZip.path);
+
+           try {
+              // Use high-level extractor
+              await extractFileToDisk(tempZip.path, unpackDir.path);
+           } finally {
+              if (await tempZip.exists()) {
+                  await tempZip.delete();
+              }
+           }
+           
+           final jsonFile = File(p.join(unpackDir.path, 'project.json'));
+           if (await jsonFile.exists()) {
+               jsonStr = await jsonFile.readAsString();
+               if (jsonStr.isEmpty) throw Exception("Project file is empty.");
+               
+               proxyRoot = p.join(unpackDir.path, 'proxies');
+           } else {
+               throw Exception("Invalid Package: project.json not found in root of archive");
+           }
+      } else {
+         jsonStr = await file.readAsString();
+      }
+
       final jsonMap = jsonDecode(jsonStr);
       var project = Project.fromJson(jsonMap);
       
       // Smart Relink
       project = await _smartRelinkAssets(project, path);
+      
+      // Auto-Sync Pending Rotations (If Originals Present)
+      project = await _syncPendingRotations(project);
 
       _undoStack.clear();
       _redoStack.clear();
@@ -1804,19 +2081,137 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
         isEditingContent: false,
         selectedBrowserPaths: {},
         currentProjectPath: path,
+        proxyRoot: proxyRoot,
       );
       
       _updateUndoRedoFlags();
-      debugPrint("Project loaded from $path");
+      debugPrint("Project loaded from $path (ProxyRoot: $proxyRoot)");
+      return true;
     } catch (e) {
       debugPrint("Error loading project: $e");
+      return false;
     }
+  }
+
+  Future<Project> _syncPendingRotations(Project project) async {
+      bool changed = false;
+      final newPages = <AlbumPage>[];
+      int syncedCount = 0;
+
+      for (var page in project.pages) {
+          bool pageChanged = false;
+          final newPhotos = <PhotoItem>[];
+          
+          for (var photo in page.photos) {
+              if (photo.rotation != 0 && photo.path.isNotEmpty) {
+                  // Check if ORIGINAL exists
+                  if (await File(photo.path).exists()) {
+                      // APPLY ROTATION TO FILE
+                      debugPrint("Auto-Sync: Applying pending rotation ${photo.rotation} to ${photo.path}");
+                      await _rotateFile(photo.path, photo.rotation.toInt());
+                      
+                      // RESET VISUAL
+                      newPhotos.add(photo.copyWith(rotation: 0));
+                      pageChanged = true;
+                      changed = true;
+                      syncedCount++;
+                      
+                      // Reset Visual in Gallery too?
+                      // We handle gallery map later.
+                      continue; 
+                  }
+              }
+              newPhotos.add(photo);
+          }
+          
+          // Background Rotation? Usually backgrounds are photos.
+          // If backgroundPath has rotation in metadata? AlbumPage doesn't save rotation for BG currently in this model.
+          
+          if (pageChanged) {
+             newPages.add(page.copyWith(photos: newPhotos));
+          } else {
+             newPages.add(page);
+          }
+      }
+      
+      if (changed) {
+          // Fix Gallery Rotations
+          // Ideally we reset the map for those keys.
+          // Since we don't return the map here, we might need to handle it.
+          // But _rotateFile updates the map in State?
+          // No, _rotateFile is an instance method on Notifier, but here we are inside a Future returning Project.
+          // We can't access `state` safely if we assume pure function or if we modify project locally.
+          // Wait, `_rotateFile` writes to disk. It does NOT update state.project.imageRotations itself unless called via `rotateGalleryPhoto` action.
+          // But here we are producing a NEW Project.
+          
+          // We need to clear rotation entries for the synced files.
+          // Let's rely on the fact that if we zero them out in pages, they are zeroed there.
+          // For Gallery, we might need to clear the map entries in `state` later?
+          // Simplest: construct the updated project with cleaned imageRotations.
+          
+          final newRotations = Map<String, int>.from(project.imageRotations);
+          for (var page in newPages) {
+             for (var p in page.photos) {
+                 if (p.rotation == 0 && project.imageRotations[p.path] != 0) {
+                     // Potential conflict if same photo used twice with different rotations?
+                     // If used twice with different rotations, we can only fix one?
+                     // Destructive file rotation is global.
+                     // If one instance was +90 and another +180... we have a problem.
+                     // User said "Visualização to File".
+                     // If multiple conflicts, we pick one?
+                     // Usually user rotates "The Photo".
+                     newRotations[p.path] = 0;
+                 }
+             }
+          }
+          
+          if (syncedCount > 0) {
+             debugPrint("Auto-Sync: Synced $syncedCount photos to disk.");
+          }
+          
+          return project.copyWith(pages: newPages, imageRotations: newRotations);
+      }
+      
+      return project;
   }
 
   Future<Project> _smartRelinkAssets(Project project, String projectPath) async {
       final projectDir = File(projectPath).parent.path;
       bool changed = false;
       final newPages = <AlbumPage>[];
+      
+      // Get Standard Template Dirs
+      Directory? appSupportTemplates;
+      Directory? documentsTemplates;
+      try {
+         final support = await getApplicationSupportDirectory();
+         appSupportTemplates = Directory(p.join(support.path, 'templates'));
+         
+         final docs = await getApplicationDocumentsDirectory();
+         documentsTemplates = Directory(p.join(docs.path, 'AiaAlbum', 'Templates'));
+      } catch (_) {}
+
+      Future<String?> findAlternatePath(String originalPath) async {
+           final filename = p.basename(originalPath);
+           
+           // 1. Check Project Dir
+           final cand1 = p.join(projectDir, filename);
+           if (File(cand1).existsSync()) return cand1;
+           
+           // 2. Check AppSupport Templates
+           if (appSupportTemplates != null) {
+              final cand2 = p.join(appSupportTemplates.path, filename);
+              if (await File(cand2).exists()) return cand2;
+           }
+           
+           // 3. Check Documents Templates
+           if (documentsTemplates != null) {
+              final cand3 = p.join(documentsTemplates.path, filename);
+              if (await File(cand3).exists()) return cand3;
+           }
+           
+           return null;
+      }
 
       for (final page in project.pages) {
           final newPhotos = <PhotoItem>[];
@@ -1824,11 +2219,11 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
           String? newBgPath = page.backgroundPath;
           if (newBgPath != null && newBgPath.isNotEmpty) {
              if (!File(newBgPath).existsSync()) {
-                 final candidate = p.join(projectDir, p.basename(newBgPath));
-                 if (File(candidate).existsSync()) {
-                     newBgPath = candidate;
+                 final fixed = await findAlternatePath(newBgPath);
+                 if (fixed != null) {
+                     newBgPath = fixed;
                      changed = true;
-                     debugPrint("Smart Relink: Fixed Background $candidate");
+                     debugPrint("Smart Relink: Fixed Background $fixed");
                  }
              }
           }
@@ -1843,13 +2238,13 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
               String currentPath = photo.path;
               // Check file existence
               if (currentPath.isNotEmpty && !File(currentPath).existsSync()) {
-                   // Try to find in project dir
-                   final candidate = p.join(projectDir, p.basename(currentPath));
-                   if (File(candidate).existsSync()) {
-                       newPhotos.add(photo.copyWith(path: candidate));
+                   // Try to find
+                   final fixed = await findAlternatePath(currentPath);
+                   if (fixed != null) {
+                       newPhotos.add(photo.copyWith(path: fixed));
                        pagePhotosChanged = true;
                        changed = true;
-                       debugPrint("Smart Relink: Fixed Photo $candidate");
+                       debugPrint("Smart Relink: Fixed Photo $fixed");
                        continue;
                    }
               }
@@ -1863,8 +2258,6 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
           }
       }
 
-
-
       // Fix Gallery Paths (allImagePaths)
       final newAllPaths = <String>[];
       bool galleryChanged = false;
@@ -1873,11 +2266,10 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
          String finalPath = path;
          
          if (!File(path).existsSync()) {
-             final candidate = p.join(projectDir, p.basename(path));
-             if (File(candidate).existsSync()) {
-                 finalPath = candidate;
+             final fixed = await findAlternatePath(path);
+             if (fixed != null) {
+                 finalPath = fixed;
                  galleryChanged = true;
-                // debugPrint("Smart Relink: Fixed Gallery Path $candidate");
              }
          }
          newAllPaths.add(finalPath);
@@ -1999,6 +2391,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     
     state = state.copyWith(project: state.project.copyWith(pages: renumbPages));
   }
+
 
 }
 

@@ -15,6 +15,7 @@ import 'waveform_scope.dart';
 import 'vectorscope_scope.dart';
 import 'scope_widget.dart';
 import '../editor/image_editor_view.dart';
+import 'smart_image.dart';
 
 import 'dart:ui' as ui;
 
@@ -393,10 +394,10 @@ class _BrowserFullScreenViewerState extends ConsumerState<BrowserFullScreenViewe
                                                 ),
                                                 child: ColorFiltered(
                                                     colorFilter: ColorFilter.matrix(matrix),
-                                                    child: Image.file(File(path), key: ValueKey('${path}_$version'), fit: BoxFit.contain, filterQuality: FilterQuality.high)
+                                                    child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain)
                                                 )
                                               )
-                                            : Image.file(File(path), key: ValueKey('${path}_$version'), fit: BoxFit.contain, filterQuality: FilterQuality.high),
+                                            : SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain),
                                         ),
                                       ),
                                     ),

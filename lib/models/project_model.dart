@@ -118,7 +118,8 @@ class AlbumPage {
   final int backgroundColor; // ARGB int
   final List<PhotoItem> photos;
   final int pageNumber;
-  final String? backgroundPath;
+  final String? backgroundPath; // Optional path for page background image
+  final String? label; // For production tagging (e.g. Contract Number)
 
   AlbumPage({
     String? id,
@@ -128,6 +129,7 @@ class AlbumPage {
     this.pageNumber = 0,
     List<PhotoItem>? photos,
     this.backgroundPath,
+    this.label,
   })  : id = id ?? Uuid().v4(),
         photos = photos ?? [];
 
@@ -139,6 +141,7 @@ class AlbumPage {
     int? pageNumber,
     List<PhotoItem>? photos,
     String? backgroundPath,
+    String? label,
   }) {
     return AlbumPage(
       id: id ?? this.id,
@@ -148,6 +151,7 @@ class AlbumPage {
       pageNumber: pageNumber ?? this.pageNumber,
       photos: photos ?? this.photos.map((p) => p.copyWith()).toList(),
       backgroundPath: backgroundPath ?? this.backgroundPath,
+      label: label ?? this.label,
     );
   }
 
@@ -160,6 +164,7 @@ class AlbumPage {
       'pageNumber': pageNumber,
       'photos': photos.map((p) => p.toJson()).toList(),
       'backgroundPath': backgroundPath,
+      'label': label,
     };
   }
 
@@ -174,6 +179,7 @@ class AlbumPage {
           .map((p) => PhotoItem.fromJson(p as Map<String, dynamic>))
           .toList(),
       backgroundPath: json['backgroundPath'],
+      label: json['label'],
     );
   }
 }
