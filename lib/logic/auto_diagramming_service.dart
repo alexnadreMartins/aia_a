@@ -242,7 +242,27 @@ class AutoDiagrammingService {
            // ignore
         }
         
-        availablePhotos.add(_PhotoMetaInfo(path, w, h, meta.dateTaken, meta.cameraModel));
+        
+        // Apply Time Offsets (Time Shift)
+        final offsets = model.cameraTimeOffsets;
+        DateTime date = meta.dateTaken ?? DateTime(1970);
+        
+        if (offsets.isNotEmpty) {
+           String key = meta.cameraModel ?? "";
+           // Prefer Model_Serial
+           if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
+              key = "${meta.cameraModel ?? 'Unknown'}_${meta.cameraSerial}";
+           } else if (key.isEmpty) {
+              key = "Unknown";
+           }
+           
+           final offset = offsets[key] ?? offsets[meta.cameraModel] ?? 0;
+           if (offset != 0) {
+              date = date.add(Duration(seconds: offset));
+           }
+        }
+        
+        availablePhotos.add(_PhotoMetaInfo(path, w, h, date, meta.cameraModel));
      }
 
      // 3. Advanced Sorting: Day > Camera > Time

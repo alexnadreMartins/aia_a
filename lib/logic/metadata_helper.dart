@@ -7,12 +7,14 @@ import 'dart:typed_data';
 class PhotoMetadata {
   final DateTime? dateTaken;
   final String? cameraModel;
+  final String? cameraSerial;
   final int orientation; 
   final bool isPortrait;
 
   PhotoMetadata({
     this.dateTaken,
     this.cameraModel,
+    this.cameraSerial,
     this.orientation = 1,
     this.isPortrait = false,
   });
@@ -24,9 +26,22 @@ class MetadataHelper {
     for (var path in paths) {
       final file = File(path);
       if (await file.exists()) {
-        final bytes = await file.readAsBytes();
+      if (await file.exists()) {
+        Uint8List bytes;
+        try {
+           // Read only first 128KB to avoid loading full image into memory
+           // Most EXIF data is in the header.
+           final randomAccessFile = await file.open();
+           bytes = await randomAccessFile.read(128 * 1024); 
+           await randomAccessFile.close();
+        } catch (e) {
+           // Fallback or just empty
+           bytes = Uint8List(0);
+        }
+        
         final stats = await file.stat();
         inputs.add(_MetadataInput(path, bytes, stats.modified));
+      }
       }
     }
     
@@ -46,6 +61,7 @@ class MetadataHelper {
 
     DateTime? date;
     String? camera;
+    String? serial;
     int orientation = 1;
 
     // 1. Extract Date
@@ -66,6 +82,25 @@ class MetadataHelper {
     // 2. Extract Camera
     if (data.containsKey('Image Model')) {
       camera = data['Image Model']?.toString();
+    } else if (data.containsKey('Exif.Image.Model')) {
+      camera = data['Exif.Image.Model']?.toString();
+    }
+    
+    // Fallback if Camera is Unknown: Use Folder Name or "Unknown Camera"
+    if (camera == null || camera.isEmpty) {
+        // Try to guess from Manufacturer
+        if (data.containsKey('Image Make')) {
+           camera = data['Image Make']?.toString();
+        }
+    }
+
+    // 2.1 Extract Serial
+    if (data.containsKey('Image BodySerialNumber')) {
+      serial = data['Image BodySerialNumber']?.toString();
+    } else if (data.containsKey('Exif Photo BodySerialNumber')) {
+      serial = data['Exif Photo BodySerialNumber']?.toString();
+    } else if (data.containsKey('Image CameraSerialNumber')) {
+      serial = data['Image CameraSerialNumber']?.toString();
     }
 
     // 3. Extract Orientation
@@ -98,6 +133,7 @@ class MetadataHelper {
     return PhotoMetadata(
       dateTaken: date,
       cameraModel: camera,
+      cameraSerial: serial,
       orientation: orientation,
       isPortrait: portrait,
     );

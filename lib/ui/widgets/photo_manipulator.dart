@@ -120,6 +120,7 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
     final angle = photo.rotation * (math.pi / 180);
 
     // Draggable / Swap Logic
+    // Draggable / Swap Logic
     return Positioned(
       left: photo.x,
       top: photo.y,
@@ -127,16 +128,21 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
         angle: angle,
         alignment: Alignment.topLeft,
         child: DragTarget<String>(
-          onWillAccept: (data) => data != null && data != photo.id, // Don't swap with self
+          onWillAccept: (data) => data != null && data != photo.id && !photo.isLocked,
           onAccept: (receivedId) {
              ref.read(projectProvider.notifier).swapPhotos(receivedId, photo.id);
           },
           builder: (context, candidateData, rejectedData) {
-            final isHovered = candidateData.isNotEmpty;
+            final isHovered = candidateData.isNotEmpty && !photo.isLocked;
+            final content = _buildContent(photo, angle, isHovered);
+
+            if (photo.isLocked) {
+              return content;
+            }
 
             return LongPressDraggable<String>(
               data: photo.id,
-              delay: const Duration(seconds: 2), // 2 Seconds Delay as requested
+              delay: const Duration(seconds: 2), 
               feedback: Material(
                  elevation: 8,
                  color: Colors.transparent,
@@ -144,15 +150,15 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
                    opacity: 0.8,
                    child: SizedBox(
                       width: 150, 
-                      height: 150, // Fixed thumb size for feedback
+                      height: 150, 
                       child: _uiImage == null 
                          ? const Icon(Icons.photo, size: 50, color: Colors.white)
                          : RawImage(image: _uiImage, fit: BoxFit.cover),
                    ),
                  ),
               ),
-              childWhenDragging: Opacity(opacity: 0.5, child: _buildContent(photo, angle, isHovered)),
-              child: _buildContent(photo, angle, isHovered),
+              childWhenDragging: Opacity(opacity: 0.5, child: content),
+              child: content,
             );
           }
         ),
@@ -173,7 +179,7 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
           }
         },
         onPanStart: (details) {
-          if (!widget.isSelected || widget.isEditingContent) return;
+          if (!widget.isSelected || widget.isEditingContent || photo.isLocked) return; // Prevent move if locked
           final localPos = details.localPosition;
           _activeHandle = _hitTestHandles(localPos, Size(photo.width, photo.height));
           if (_activeHandle == null) {
@@ -449,7 +455,7 @@ class PhotoPainter extends CustomPainter {
       canvas.drawRect(Offset.zero & size, paint);
 
       // Handles
-      if (!isEditingContent) {
+      if (!isEditingContent && !photo.isLocked) { // Don't show handles if locked
         _drawHandles(canvas, size);
       }
     } else {

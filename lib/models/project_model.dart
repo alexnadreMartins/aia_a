@@ -8,6 +8,8 @@ class PhotoItem {
   final String path;
   final String? text;
   final bool isText;
+  final bool isTemplate;
+  final bool isLocked;
   double x;
   double y;
   double width;
@@ -26,6 +28,8 @@ class PhotoItem {
     required this.path,
     this.text,
     this.isText = false,
+    this.isTemplate = false,
+    this.isLocked = false,
     this.x = 0,
     this.y = 0,
     this.width = 100,
@@ -43,6 +47,8 @@ class PhotoItem {
     String? path,
     String? text,
     bool? isText,
+    bool? isTemplate,
+    bool? isLocked,
     double? x,
     double? y,
     double? width,
@@ -59,6 +65,8 @@ class PhotoItem {
       path: path ?? this.path,
       text: text ?? this.text,
       isText: isText ?? this.isText,
+      isTemplate: isTemplate ?? this.isTemplate,
+      isLocked: isLocked ?? this.isLocked,
       x: x ?? this.x,
       y: y ?? this.y,
       width: width ?? this.width,
@@ -78,6 +86,8 @@ class PhotoItem {
       'path': path,
       'text': text,
       'isText': isText,
+      'isTemplate': isTemplate,
+      'isLocked': isLocked,
       'x': x,
       'y': y,
       'width': width,
@@ -97,6 +107,8 @@ class PhotoItem {
       path: json['path'],
       text: json['text'],
       isText: json['isText'] ?? false,
+      isTemplate: json['isTemplate'] ?? false,
+      isLocked: json['isLocked'] ?? false,
       x: (json['x'] as num).toDouble(),
       y: (json['y'] as num).toDouble(),
       width: (json['width'] as num).toDouble(),
@@ -192,6 +204,7 @@ class Project {
   final int ppi;
   final List<String> allImagePaths;
   final Map<String, int> imageRotations; // path -> degrees (0, 90, 180, 270)
+  final Map<String, int> cameraTimeOffsets; // Model_Serial -> Offset in Seconds
   final int currentPageIndex;
   final String? defaultBackgroundPath;
 
@@ -203,12 +216,14 @@ class Project {
     this.ppi = 300,
     List<String>? allImagePaths,
     Map<String, int>? imageRotations,
+    Map<String, int>? cameraTimeOffsets,
     this.currentPageIndex = 0,
     this.defaultBackgroundPath,
   })  : id = id ?? Uuid().v4(),
         pages = pages ?? [],
         allImagePaths = allImagePaths ?? [],
-        imageRotations = imageRotations ?? {};
+        imageRotations = imageRotations ?? {},
+        cameraTimeOffsets = cameraTimeOffsets ?? {};
 
   Project copyWith({
     String? id,
@@ -218,6 +233,7 @@ class Project {
     int? ppi,
     List<String>? allImagePaths,
     Map<String, int>? imageRotations,
+    Map<String, int>? cameraTimeOffsets,
     int? currentPageIndex,
     String? defaultBackgroundPath,
   }) {
@@ -229,6 +245,7 @@ class Project {
       ppi: ppi ?? this.ppi,
       allImagePaths: allImagePaths ?? this.allImagePaths,
       imageRotations: imageRotations ?? this.imageRotations,
+      cameraTimeOffsets: cameraTimeOffsets ?? this.cameraTimeOffsets,
       currentPageIndex: currentPageIndex ?? this.currentPageIndex,
       defaultBackgroundPath: defaultBackgroundPath ?? this.defaultBackgroundPath,
     );
@@ -243,6 +260,7 @@ class Project {
       'ppi': ppi,
       'allImagePaths': allImagePaths,
       'imageRotations': imageRotations,
+      'cameraTimeOffsets': cameraTimeOffsets,
       'currentPageIndex': currentPageIndex,
       'defaultBackgroundPath': defaultBackgroundPath,
     };
@@ -259,6 +277,7 @@ class Project {
       ppi: json['ppi'] as int? ?? 300,
       allImagePaths: List<String>.from(json['allImagePaths'] ?? []),
       imageRotations: Map<String, int>.from(json['imageRotations'] ?? {}),
+      cameraTimeOffsets: Map<String, int>.from(json['cameraTimeOffsets'] ?? {}),
       currentPageIndex: json['currentPageIndex'] as int? ?? 0,
       defaultBackgroundPath: json['defaultBackgroundPath'],
     );

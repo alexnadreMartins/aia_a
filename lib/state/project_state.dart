@@ -222,7 +222,180 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     _updateUndoRedoFlags();
   }
 
-  // --- Actions ---
+  // --- Page Management ---
+
+  void moveSelectedPages(int newIndex) {
+    var selected = state.multiSelectedPages.toList()..sort();
+    if (selected.isEmpty) {
+      if (state.project.currentPageIndex >= 0) {
+        selected = [state.project.currentPageIndex];
+      } else {
+        return;
+      }
+    }
+
+    _saveStateToHistory();
+
+    final pages = List<AlbumPage>.from(state.project.pages);
+    final selectedPages = selected.map((i) => pages[i]).toList();
+
+    // Remove from old positions (iterate backwards to avoid index shift)
+    for (var i in selected.reversed) {
+      pages.removeAt(i);
+    }
+
+    // Calculate insertion index
+    // Verify target index logic: if we drag 0,1,2 to 5. 
+    // Removed 0,1,2. List shrinks by 3.
+    // If original target was 5, now it should be 5-3=2?
+    // It depends on visual drag target.
+    // Typically reorderable list gives *new* index assuming items are present?
+    // Or simpler: If target > source, subtract count.
+    
+    int insertIdx = newIndex;
+    // Adjust insert index based on how many selected items were *before* it
+    int itemsBefore = selected.where((s) => s < newIndex).length;
+    insertIdx -= itemsBefore;
+    
+    if (insertIdx < 0) insertIdx = 0;
+    if (insertIdx > pages.length) insertIdx = pages.length;
+
+    pages.insertAll(insertIdx, selectedPages);
+
+    state = state.copyWith(
+        project: state.project.copyWith(pages: pages),
+        multiSelectedPages: {}, // Clear selection or restore it?
+        // Ideally restore selection indices
+    );
+    
+    // Restore selection selection
+    final newSelection = <int>{};
+    for (int i = 0; i < selectedPages.length; i++) {
+      newSelection.add(insertIdx + i);
+    }
+    state = state.copyWith(multiSelectedPages: newSelection);
+  }
+
+  void removeSelectedPages() {
+    var selected = state.multiSelectedPages.toList()..sort();
+    if (selected.isEmpty) {
+       // If no multi-select, try current page
+       if (state.project.currentPageIndex >= 0) {
+          selected = [state.project.currentPageIndex];
+       } else {
+         return;
+       }
+    }
+
+    _saveStateToHistory();
+    final pages = List<AlbumPage>.from(state.project.pages);
+    
+    // Remove backwards
+    for (var i in selected.reversed) {
+       if (i >= 0 && i < pages.length) {
+         pages.removeAt(i);
+       }
+    }
+    
+    // Ensure at least one page
+    if (pages.isEmpty) {
+       pages.add(_createDefaultPage());
+    }
+    
+    int newIndex = state.project.currentPageIndex;
+    if (newIndex >= pages.length) newIndex = pages.length - 1;
+
+    state = state.copyWith(
+       project: state.project.copyWith(pages: pages, currentPageIndex: newIndex),
+       multiSelectedPages: {},
+    );
+  }
+
+  Future<void> sortPagesByDate() async {
+     _saveStateToHistory();
+     
+     final pages = state.project.pages;
+     // Map Page -> Date
+     // Use first photo of page
+     final pageDates = <String, DateTime>{}; 
+     
+     // Pre-fetch metadata if needed?
+     // We can just rely on File stats for simplicity OR use our MetadataHelper
+     List<String> neededPaths = [];
+     for (var p in pages) {
+        if (p.photos.isNotEmpty && p.photos.first.path.isNotEmpty) {
+           neededPaths.add(p.photos.first.path);
+        }
+     }
+     
+     // Bulk fetch metadata (includes serials etc now)
+     final metas = await MetadataHelper.getMetadataBatch(neededPaths);
+     // Map path -> Meta
+     final metaMap = { for (var m in metas) neededPaths[metas.indexOf(m)]: m }; // Risky if list mismatch
+     // Better: MetadataHelper returns list matching input? Usually.
+     // Let's assume input order matches output or map it.
+     // Actually MetadataHelper.getMetadataBatch returns Parallel results?
+     // The loop in MetadataHelper builds result list matching inputs. Yes.
+     
+     for (int i=0; i<pages.length; i++) {
+        final p = pages[i];
+        if (p.photos.isEmpty || p.photos.first.path.isEmpty) {
+           pageDates[p.id] = DateTime(2999); // Empty pages last
+           continue;
+        }
+        
+        DateTime date = DateTime(1970);
+        final path = p.photos.first.path;
+        
+        // 1. Get Date
+        if (metaMap.length > neededPaths.indexOf(path)) {
+             date = metaMap[path]?.dateTaken ?? DateTime(1970);
+             
+             // 2. Apply Time Offset
+             final meta = metaMap[path];
+             if (meta != null) {
+                // Key: Model_Serial or Model
+                String key = meta.cameraModel ?? "";
+                if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
+                   key = "${meta.cameraModel ?? 'Unknown'}_${meta.cameraSerial}";
+                }
+                
+                final offset = state.project.cameraTimeOffsets[key] ?? state.project.cameraTimeOffsets[meta.cameraModel] ?? 0;
+                if (offset != 0) {
+                   date = date.add(Duration(seconds: offset));
+                }
+             }
+        }
+        pageDates[p.id] = date;
+     }
+     
+     final sortedPages = List<AlbumPage>.from(pages);
+     sortedPages.sort((a, b) {
+        return pageDates[a.id]!.compareTo(pageDates[b.id]!);
+     });
+     
+     state = state.copyWith(project: state.project.copyWith(pages: sortedPages));
+  }
+  
+  void sortPagesByName() {
+     _saveStateToHistory();
+      final sortedPages = List<AlbumPage>.from(state.project.pages);
+      sortedPages.sort((a, b) {
+         String nameA = "";
+         String nameB = "";
+         if (a.photos.isNotEmpty) nameA = p.basename(a.photos.first.path);
+         if (b.photos.isNotEmpty) nameB = p.basename(b.photos.first.path);
+         return nameA.toLowerCase().compareTo(nameB.toLowerCase());
+      });
+      state = state.copyWith(project: state.project.copyWith(pages: sortedPages));
+  }
+
+  void updateCameraTimeOffsets(Map<String, int> offsets) {
+     _saveStateToHistory();
+     state = state.copyWith(
+       project: state.project.copyWith(cameraTimeOffsets: offsets)
+     );
+  }
 
   void selectPhoto(String? photoId) {
     if (state.selectedPhotoId == photoId) {
@@ -394,15 +567,20 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
            // We need to revert the metadata rotation we applied optimistically, 
            // because now the bits are rotated.
            
-           // 1. Update Browser Rotations (Set back to 0)
-           final currentRot = state.project.imageRotations[path] ?? 0;
-           // The state might have changed since we started!
-           // But generally: if we rotated file by 'degrees', we subtract 'degrees' from visual.
-           final newRot = (currentRot - degrees) % 360;
-           final newRotations = Map<String, int>.from(state.project.imageRotations);
-           newRotations[path] = newRot; // Usually 0
-           
-           // 2. Update Page Photos (Set back to 0 if we passed an ID)
+            // 1. Update Browser Rotations
+            // We subtract the baked-in degrees from the visual offset.
+            final currentRot = state.project.imageRotations[path] ?? 0;
+            final newRot = (currentRot - degrees) % 360;
+            final newRotations = Map<String, int>.from(state.project.imageRotations);
+            
+            // Fix: Clean up map if 0
+            if (newRot == 0) {
+               newRotations.remove(path);
+            } else {
+               newRotations[path] = newRot;
+            }
+            
+            // 2. Update Page Photos (if resetPhotoId provided)
            List<AlbumPage> newPages = state.project.pages;
            if (resetPhotoId != null) {
                newPages = state.project.pages.map((page) {
@@ -981,27 +1159,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
       );
   }
 
-  void removeSelectedPages() {
-      if (state.multiSelectedPages.isEmpty) return;
-      _saveStateToHistory();
-      
-      final pages = List<AlbumPage>.from(state.project.pages);
-      final sortedIndices = state.multiSelectedPages.toList()..sort((a,b) => b.compareTo(a)); 
-      
-      for(var i in sortedIndices) {
-          if (i < pages.length && pages.length > 1) {
-             pages.removeAt(i);
-          }
-      }
-      
-      int newIndex = state.project.currentPageIndex;
-      if (newIndex >= pages.length) newIndex = pages.length - 1;
-      
-      state = state.copyWith(
-          project: state.project.copyWith(pages: pages, currentPageIndex: newIndex),
-          multiSelectedPages: {},
-      );
-  }
+
 
   void reorderPage(int oldIndex, int newIndex) {
     _saveStateToHistory();
@@ -1507,49 +1665,76 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   }
 
 
-  void swapPhotos(String id1, String id2) {
+  void swapPhotos(String sourceId, String targetId) {
       final pIdx = state.project.currentPageIndex;
       if (pIdx < 0) return;
       
       final page = state.project.pages[pIdx];
-      final p1Index = page.photos.indexWhere((p) => p.id == id1);
-      final p2Index = page.photos.indexWhere((p) => p.id == id2);
       
-      if (p1Index == -1 || p2Index == -1) return;
-      
+      // Check if Source is a File Path (Drag from Browser/External)
+      // If index is -1, it's likely a file path (unless it's a bug)
+      final p1Index = page.photos.indexWhere((p) => p.id == sourceId);
+      final p2Index = page.photos.indexWhere((p) => p.id == targetId);
+
+      if (p2Index == -1) return; // Target not found (weird) or drop on background (handled elsewhere?)
+
       _saveStateToHistory();
-      
-      final p1 = page.photos[p1Index];
-      final p2 = page.photos[p2Index];
-      
-      // Swap content (Path) but KEEP Frame properties (x, y, w, h, rotation)
-      // We also reset crop (contentX/Y/Scale) because the new image likely won't match the old crop perfectly
-      
-      final newP1 = p1.copyWith(
-         path: p2.path, 
-         contentX: 0, contentY: 0, contentScale: 1.0, 
-         // preserve existing frame rotation? Or should we swap image rotation?
-         // Frame rotation (p1.rotation) belongs to the layout.
-         // EXIF Orientation belongs to the image. It is read from file, effectively swapped.
-      );
-      
-      final newP2 = p2.copyWith(
-         path: p1.path,
-         contentX: 0, contentY: 0, contentScale: 1.0,
-      );
-      
-      final newPhotos = List<PhotoItem>.from(page.photos);
-      newPhotos[p1Index] = newP1;
-      newPhotos[p2Index] = newP2;
-      
-      state = state.copyWith(
-         project: state.project.copyWith(
-            pages: [
-               for (int i=0; i<state.project.pages.length; i++)
-                  if (i == pIdx) page.copyWith(photos: newPhotos) else state.project.pages[i]
-            ]
-         )
-      );
+
+      if (p1Index == -1) {
+         // --- REPLACE OPERATION (External File -> Existing Slot) ---
+         // sourceId is actually the file path
+         final targetPhoto = page.photos[p2Index];
+         
+         // If target is locked AND not empty, do we allow?
+         // User wanted to "replace placeholder" (which might be locked?) NO, placeholders are not locked usually.
+         // If "over existing photo", we replace.
+         
+         final newPhoto = targetPhoto.copyWith(
+            path: sourceId, // Use the path
+            contentX: 0, contentY: 0, contentScale: 1.0, 
+            // Reset crop
+         );
+         
+         final newPhotos = List<PhotoItem>.from(page.photos);
+         newPhotos[p2Index] = newPhoto;
+         
+         state = state.copyWith(
+            project: state.project.copyWith(
+               pages: [
+                  for (int i=0; i<state.project.pages.length; i++)
+                     if (i == pIdx) page.copyWith(photos: newPhotos) else state.project.pages[i]
+               ]
+            )
+         );
+         
+      } else {
+         // --- SWAP OPERATION (Internal Photo <-> Internal Photo) ---
+         final p1 = page.photos[p1Index];
+         final p2 = page.photos[p2Index];
+         
+         final newP1 = p1.copyWith(
+            path: p2.path, 
+            contentX: 0, contentY: 0, contentScale: 1.0, 
+         );
+         
+         final newP2 = p2.copyWith(
+            path: p1.path,
+            contentX: 0, contentY: 0, contentScale: 1.0,
+         );
+         
+         final newPhotos = List<PhotoItem>.from(page.photos);
+         newPhotos[p1Index] = newP1;
+         newPhotos[p2Index] = newP2;
+         
+         state = state.copyWith(
+            project: state.project.copyWith(
+               pages: [
+                  for (int i=0; i<state.project.pages.length; i++)
+                     if (i == pIdx) page.copyWith(photos: newPhotos) else state.project.pages[i]
+               ]
+            )
+         );
+      }
   }
 
   // --- Auto-Group Verticals ---
@@ -2008,10 +2193,19 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
           final jsonStr = jsonEncode(state.project.toJson());
           await File(path).writeAsString(jsonStr);
       }
-
-      state = state.copyWith(currentProjectPath: path);
+      
+      // Update Project Name from Filename (if it's not the default "New Project" or if we want to sync them)
+      // Usually "Save As" implies renaming the project context.
+      final name = path.split(Platform.pathSeparator).last;
+      final nameNoExt = name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
+      
+      state = state.copyWith(
+          currentProjectPath: path,
+          project: state.project.copyWith(name: nameNoExt)
+      );
+      
       _updateUndoRedoFlags(); // Just to refresh state if needed
-      debugPrint("Project saved to $path");
+      debugPrint("Project saved to $path with name $nameNoExt");
     } catch (e) {
       debugPrint("Error saving project: $e");
     }

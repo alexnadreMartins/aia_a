@@ -56,6 +56,8 @@ class AiAAlbumApp extends StatelessWidget {
         dragDevices: {
           PointerDeviceKind.touch,
           PointerDeviceKind.stylus,
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.trackpad,
           PointerDeviceKind.unknown,
         },
       ),

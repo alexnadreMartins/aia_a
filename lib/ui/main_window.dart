@@ -11,6 +11,7 @@ import 'widgets/diagram_progress_overlay.dart';
 import '../logic/standard_template_initializer.dart';
 import '../logic/rapid_diagramming_service.dart';
 import 'dialogs/rapid_diagramming_dialog.dart';
+import 'package:aia_album/ui/dialogs/time_shift_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart'; // For PointerScrollEvent
@@ -1468,6 +1469,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                           MaterialPageRoute(builder: (_) => BrowserFullScreenViewer(paths: displayedPaths, initialIndex: i)),
                         );
                       },
+                      onSecondaryTapUp: (details) {
+                          _showBrowserContextMenu(context, ref, path, details.globalPosition);
+                      },
                       child: Stack(
                         children: [
                           Container(
@@ -1560,6 +1564,12 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       icon: const Icon(Icons.auto_awesome, size: 14, color: Colors.amberAccent),
                       label: const Text("AutoSelect", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
                       onPressed: () => _handleAutoSelect(context, notifier),
+                      style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8)),
+                   ),
+                   TextButton.icon(
+                      icon: const Icon(Icons.timer, size: 14, color: Colors.blueAccent),
+                      label: const Text("TimeShift", style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
+                      onPressed: () => showDialog(context: context, builder: (c) => const TimeShiftDialog()),
                       style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8)),
                    ),
                  ],
@@ -1720,6 +1730,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                           ),
                         ),
                         child: GestureDetector(
+                          onSecondaryTapDown: (details) {
+                               _showBrowserContextMenu(context, ref, path, details.globalPosition);
+                          },
                           onTap: () => ref.read(projectProvider.notifier).toggleBrowserPathSelection(path),
                           child: Container(
                             decoration: BoxDecoration(
@@ -2250,7 +2263,41 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   Widget _buildThumbnails(WidgetRef ref, PhotoBookState state) {
   return Container(
     color: const Color(0xFF1E1E1E),
-    child: CallbackShortcuts(
+    child: Column(
+      children: [
+        // Timeline Header (Sort & Info)
+        Container(
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          color: Colors.black26,
+          child: Row(
+            children: [
+               const Icon(Icons.view_timeline, size: 16, color: Colors.white54),
+               const SizedBox(width: 8),
+               Text(
+                 "Páginas (${state.project.pages.length})", 
+                 style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)
+               ),
+               const Spacer(),
+               // Sort Buttons
+               TextButton.icon(
+                 icon: const Icon(Icons.calendar_month, size: 14, color: Colors.white60),
+                 label: const Text("Ordenar Data", style: TextStyle(fontSize: 11, color: Colors.white60)),
+                 style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8)),
+                 onPressed: () => ref.read(projectProvider.notifier).sortPagesByDate(),
+               ),
+               TextButton.icon(
+                 icon: const Icon(Icons.sort_by_alpha, size: 14, color: Colors.white60),
+                 label: const Text("Ordenar Nome", style: TextStyle(fontSize: 11, color: Colors.white60)),
+                 style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8)),
+                 onPressed: () => ref.read(projectProvider.notifier).sortPagesByName(),
+               ),
+            ],
+          ),
+        ),
+        
+        Expanded(
+          child: CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.delete, shift: true): () {
             if (state.multiSelectedPages.isNotEmpty) {
@@ -2349,6 +2396,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                            ),
                            color: const Color(0xFF262626),
                            items: [
+                             if (multiCount > 0)
+                               PopupMenuItem(
+                                 child: const ListTile(
+                                    leading: Icon(Icons.drive_file_move, color: Colors.blueAccent, size: 18), 
+                                    title: Text("Mover Selecionados p/ Cá", style: TextStyle(color: Colors.white))
+                                 ),
+                                 onTap: () {
+                                   ref.read(projectProvider.notifier).moveSelectedPages(index);
+                                 },
+                               ),
                              if (multiCount > 1) 
                                PopupMenuItem(
                                  child: const ListTile(
@@ -2392,14 +2449,14 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                   // Page Content Preview (Actual Photos)
                   Positioned.fill(
                     child: Padding(
-                      padding: const EdgeInsets.all(4.0),
+                      padding: const EdgeInsets.all(0), // Remove padding to fix aspect ratio
                       child: _buildMiniPagePreview(page),
                     ),
                   ),
                   
                   // Page Number Badge
                   Positioned(
-                    top: 4, left: 4,
+                    top: 2, left: 2,
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
@@ -2438,7 +2495,50 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ),
         ),
       ),
-    );
+    ),
+      ],
+    ),
+  );
+  }
+
+  void _showBrowserContextMenu(BuildContext context, WidgetRef ref, String path, Offset globalPos) {
+      final RenderBox? overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+      if (overlay == null) return;
+      
+      showMenu(
+         context: context,
+         position: RelativeRect.fromLTRB(
+            globalPos.dx, globalPos.dy,
+            overlay.size.width - globalPos.dx,
+            overlay.size.height - globalPos.dy
+         ),
+         color: const Color(0xFF262626),
+         items: [
+             PopupMenuItem(
+                child: const ListTile(
+                    leading: Icon(Icons.timer, color: Colors.amberAccent),
+                    title: Text("Ajustar Horário (Time Shift)", style: TextStyle(color: Colors.white))
+                ),
+                onTap: () {
+                    // Slight delay to allow menu to close
+                    Future.delayed(Duration(milliseconds: 100), () {
+                        showDialog(
+                           context: context,
+                           builder: (ctx) => const TimeShiftDialog()
+                        );
+                    });
+                },
+             ),
+             // We can add "Rotate" here too if we want
+             PopupMenuItem(
+                child: const ListTile(
+                    leading: Icon(Icons.rotate_right, color: Colors.white),
+                    title: Text("Girar 90°", style: TextStyle(color: Colors.white))
+                ),
+                onTap: () => ref.read(projectProvider.notifier).rotateGalleryPhoto(path, 90),
+             ),
+         ]
+      );
   }
 
   Widget _buildMiniPagePreview(AlbumPage page) {
@@ -3122,6 +3222,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   void _handleDrop(WidgetRef ref, Offset dropPos, List<String> paths, AlbumPage currentPage) {
     bool handled = false;
     for (final photo in currentPage.photos.reversed) {
+       // Ignore Locked Items for Drop Target (unless they are placeholders/empty?)
+       // If locked and not empty, we shouldn't replace it.
+       if (photo.isLocked && photo.path.isNotEmpty) continue;
+       
+       // Optimization: Prioritize "Empty" placeholders if we have overlap
+       // But 'reversed' suggests z-order check (top first).
+       // If we have a Template Frame (Z=5, Locked) and a Photo (Z=1), 
+       // the loop hits Frame first. We continue (skip).
+       // Then hits Photo. Logic works.
+       
       final rect = Rect.fromLTWH(photo.x, photo.y, photo.width, photo.height);
       if (rect.contains(dropPos)) {
         if (paths.isNotEmpty && _isImage(paths.first)) {
@@ -3136,52 +3246,18 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
        final validPaths = paths.where((p) => _isImage(p)).toList();
        if (validPaths.isEmpty) return;
 
-       // Ask User: Photos or Background?
-       showDialog(
-         context: context,
-         builder: (ctx) => AlertDialog(
-           title: const Text("Importar Imagens"),
-           content: Text("Você soltou ${validPaths.length} arquivo(s). Como deseja adicioná-los?"),
-           actions: [
-             TextButton(
-               onPressed: () { 
-                 Navigator.pop(ctx); // Cancel
-               },
-               child: const Text("Cancelar"),
-             ),
-             TextButton(
-               onPressed: () {
-                 Navigator.pop(ctx);
-                 // Add as Photos
-                 for (final path in validPaths) {
-                    final item = PhotoItem(
-                       id: Uuid().v4(),
-                       path: path, 
-                       x: dropPos.dx - 50, 
-                       y: dropPos.dy - 50, 
-                       width: 100, 
-                       height: 100
-                    );
-                    ref.read(projectProvider.notifier).addPhotoToCurrentPage(item);
-                 }
-               }, 
-               child: const Text("Adicionar como Fotos"),
-             ),
-             ElevatedButton(
-               onPressed: () {
-                 Navigator.pop(ctx);
-                 // Proceed to set Background (using first image if multiple, or ask? Usually background is single)
-                 // If multiple, we just use the first one for now or loop? Background is 1 per page.
-                 // Let's use the first one.
-                 if (validPaths.isNotEmpty) {
-                    _promptForBackgroundScope(ref, validPaths.first);
-                 }
-               },
-               child: const Text("Definir como Fundo"),
-             ),
-           ],
-         )
-       );
+       // Directly Add as Photos (User Request: No Dialog)
+       for (final path in validPaths) {
+          final item = PhotoItem(
+             id: Uuid().v4(),
+             path: path, 
+             x: dropPos.dx - 50, 
+             y: dropPos.dy - 50, 
+             width: 100, 
+             height: 100
+          );
+          ref.read(projectProvider.notifier).addPhotoToCurrentPage(item);
+       }
     }
   }
 
@@ -3272,6 +3348,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         width: pageWidth,
         height: pageHeight,
         zIndex: 5, // Frame usually on top of photos
+        isTemplate: true,
+        isLocked: true, // Lock the template frame
       );
       
       // 2. Identify Holes
@@ -3297,6 +3375,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         // Bleeding calculation (1%)
         final double bleedW = hole.width * 0.01;
         final double bleedH = hole.height * 0.01;
+        // Fix: Use correct hole coordinates without scaling if asset defines logical 0-1
+        // The asset.holes should already be 0-1 if they are "logical". 
+        // Assuming asset holes are normalized 0-1.
+        
         final double finalX = (hole.left - bleedW) * pageWidth;
         final double finalY = (hole.top - bleedH) * pageHeight;
         final double finalW = (hole.width + 2 * bleedW) * pageWidth;
