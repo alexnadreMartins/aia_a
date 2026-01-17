@@ -6,16 +6,21 @@ import 'package:window_manager/window_manager.dart';
 import 'package:firedart/firedart.dart';
 import 'ui/root_widget.dart' as app_root;
 
-void main() async {
+void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+
   await windowManager.ensureInitialized();
   
   // Initialize Firedart (Firebase for Linux)
-  FirebaseAuth.initialize(
-    "AIzaSyBXux5MBn3DBA0cu6u_BmnzsCDq5aLIklQ",
-    VolatileStore(),
-  );
-  Firestore.initialize("aiaalbum");
+  try {
+     FirebaseAuth.initialize(
+       "AIzaSyBXux5MBn3DBA0cu6u_BmnzsCDq5aLIklQ",
+       VolatileStore(),
+     );
+     Firestore.initialize("aiaalbum");
+  } catch (e) {
+     // Ignore if already initialized or error on Windows if purely local
+  }
 
   WindowOptions windowOptions = const WindowOptions(
     size: Size(1280, 800),

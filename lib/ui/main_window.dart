@@ -19,6 +19,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:pdf/pdf.dart';
 import 'package:uuid/uuid.dart';
@@ -37,7 +38,9 @@ import '../../logic/cache_provider.dart';
 import 'widgets/photo_manipulator.dart';
 import 'widgets/smart_image.dart';
 import 'widgets/properties_panel.dart';
-import 'widgets/task_queue_indicator.dart';
+import 'widgets/resizable_pane.dart';
+import 'widgets/dock_panel.dart';
+import 'docks/browser_dock.dart';
 import 'batch_editor/batch_editor_view.dart';
 import '../logic/project_packager.dart';
 
@@ -54,13 +57,48 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   final ScrollController _thumbScrollController = ScrollController();
   final TransformationController _transformationController = TransformationController();
   final FocusNode _canvasFocusNode = FocusNode();
-  int _leftDockIndex = 0;
+  
+  // Dock State
+  double _leftPanelWidth = 300.0;
+  double _rightPanelWidth = 300.0;
+  double _bottomPanelHeight = 160.0;
+  
+  int _leftDockIndex = 0; // 0 = Fotos, 1 = Assets
   String? _lastSelectedBrowserPath;
+
+  // Floating Dock State (ValueNotifiers for Performance)
+  late ValueNotifier<bool> _isLeftDockFloating;
+  late ValueNotifier<Offset> _leftDockPos;
+  late ValueNotifier<bool> _showLeftSnap;
+
+  late ValueNotifier<bool> _isRightDockFloating;
+  late ValueNotifier<Offset> _rightDockPos;
+  late ValueNotifier<bool> _showRightSnap;
+
+  late ValueNotifier<bool> _isBottomDockFloating;
+  late ValueNotifier<Offset> _bottomDockPos;
+  late ValueNotifier<bool> _showBottomSnap;
+
  // 0 = Fotos, 1 = Assets
 
   @override
   void initState() {
     super.initState();
+    // Dock State initialized
+    
+    // Dock State initialized
+    _isLeftDockFloating = ValueNotifier(false);
+    _leftDockPos = ValueNotifier(const Offset(50, 100)); // Default floating pos
+    _showLeftSnap = ValueNotifier(false);
+
+    _isRightDockFloating = ValueNotifier(false);
+    _rightDockPos = ValueNotifier(const Offset(800, 100));
+    _showRightSnap = ValueNotifier(false);
+
+    _isBottomDockFloating = ValueNotifier(false);
+    _bottomDockPos = ValueNotifier(const Offset(300, 500));
+    _showBottomSnap = ValueNotifier(false);
+
     _transformationController.addListener(() {
       final zoom = _transformationController.value.getMaxScaleOnAxis();
       ref.read(projectProvider.notifier).setCanvasScale(zoom);
@@ -90,6 +128,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   void dispose() {
     _thumbScrollController.dispose();
     _transformationController.dispose();
+    
+    _isLeftDockFloating.dispose();
+    _leftDockPos.dispose();
+    _showLeftSnap.dispose();
+    _isRightDockFloating.dispose();
+    _rightDockPos.dispose();
+    _showRightSnap.dispose();
+    _isBottomDockFloating.dispose();
+    _bottomDockPos.dispose();
+    _showBottomSnap.dispose();
     super.dispose();
   }
 
@@ -262,8 +310,28 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    Expanded(
                      child: Row(
                        children: [
-                         // Left Dock
-                         _buildLeftDock(ref),
+                          // Left Dock (Resizable)
+                          ValueListenableBuilder<bool>(
+                            valueListenable: _isLeftDockFloating,
+                            builder: (context, isFloating, child) {
+                               if (isFloating) return const SizedBox.shrink();
+                               return ResizablePane(
+                                 width: _leftPanelWidth,
+                                 edge: ResizeEdge.right,
+                                 onResize: (delta) => setState(() {
+                                    _leftPanelWidth = (_leftPanelWidth + delta).clamp(200.0, 600.0);
+                                 }),
+                                 child: DockPanel(
+                                    title: "Navegador",
+                                    tabs: const ["Fotos", "Assets"],
+                                    selectedTabIndex: _leftDockIndex,
+                                    onTabSelected: (i) => setState(() => _leftDockIndex = i),
+                                    onDetach: () => _isLeftDockFloating.value = true,
+                                    child: _leftDockIndex == 0 ? const BrowserDock() : _buildAssetsDock(ref),
+                                 ),
+                               );
+                            }
+                          ),
                          
                          // Center Canvas
                          Expanded(
@@ -275,21 +343,53 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                            ),
                          ),
                          
-                         // Right Dock
-                         _buildDock("Properties & Photos", 300, _buildRightDock(context, ref, state)),
+                         // Right Dock (Resizable)
+                          ValueListenableBuilder<bool>(
+                            valueListenable: _isRightDockFloating,
+                            builder: (context, isFloating, child) {
+                               if (isFloating) return const SizedBox.shrink();
+                               return ResizablePane(
+                               width: _rightPanelWidth,
+                               edge: ResizeEdge.left,
+                               onResize: (delta) => setState(() {
+                                  _rightPanelWidth = (_rightPanelWidth + delta).clamp(250.0, 500.0);
+                               }),
+                               child: DockPanel(
+                                  title: "Propriedades",
+                                  tabs: const [], // Single Tab for now
+                                  onTabSelected: (_) {},
+                                  selectedTabIndex: 0,
+                                  onDetach: () => _isRightDockFloating.value = true,
+                                  child: _buildRightDock(context, ref, state),
+                               ),
+                             );
+                            }
+                          ),
                        ],
                      ),
                    ),
                    
-                   // Bottom Dock (Thumbnails)
-                   SizedBox(
-                     height: 160,
-                     child: _buildDock(
-                       "Linha do Tempo  •  ${state.project.pages.length} Páginas",
-                       double.infinity,
-                       _buildThumbnails(ref, state),
-                     ),
-                   ),
+                   // Bottom Dock (Timeline) - Resizable Top Edge
+                    ValueListenableBuilder<bool>(
+                        valueListenable: _isBottomDockFloating,
+                        builder: (context, isFloating, child) {
+                           if (isFloating) return const SizedBox.shrink();
+                           return ResizablePane(
+                              width: _bottomPanelHeight, // reused as height
+                              edge: ResizeEdge.top,
+                              onResize: (delta) => setState(() {
+                                 // Dragging UP (negative Y) -> Positive Delta (implemented in ResizablePane logic for Top Edge: -dy)
+                                 _bottomPanelHeight = (_bottomPanelHeight + delta).clamp(100.0, 500.0);
+                              }),
+                              child: DockPanel(
+                                 title: "Linha do Tempo  •  ${state.project.pages.length} Páginas",
+                                 onTabSelected: (_) {},
+                                 onDetach: () => _isBottomDockFloating.value = true,
+                                 child: _buildThumbnails(ref, state),
+                              ),
+                           );
+                        }
+                    ),
                  ],
                ),
                
@@ -325,13 +425,155 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                    ),
                  ),
                  
-                 const DiagramProgressOverlay(),
+                  const DiagramProgressOverlay(),
+
+               // --- Floating Docks (Optimized with ValueListenableBuilder) ---
+
+               // Left Floating Dock
+               ValueListenableBuilder<bool>(
+                  valueListenable: _isLeftDockFloating,
+                  builder: (ctx, isFloating, _) {
+                     if (!isFloating) return const SizedBox.shrink();
+                     return ValueListenableBuilder<Offset>(
+                        valueListenable: _leftDockPos,
+                        builder: (ctx, pos, _) {
+                           return Positioned(
+                              left: pos.dx, top: pos.dy,
+                              child: SizedBox(
+                                 width: 320, height: 600,
+                                 child: DockPanel(
+                                     title: "Navegador (Flutuante)",
+                                     tabs: const ["Fotos", "Assets"],
+                                     selectedTabIndex: _leftDockIndex,
+                                     onTabSelected: (i) => setState(() => _leftDockIndex = i),
+                                     onDetach: () {}, // Already detached
+                                     onDragStart: (_) {},
+                                     onDragUpdate: (d) {
+                                         _leftDockPos.value += d.delta;
+                                         // Check Snap
+                                         _showLeftSnap.value = _leftDockPos.value.dx < 50;
+                                     },
+                                     onDragEnd: (_) {
+                                         if (_showLeftSnap.value) {
+                                            _isLeftDockFloating.value = false;
+                                            _showLeftSnap.value = false;
+                                            _leftDockPos.value = const Offset(50, 100); // Reset
+                                         }
+                                     },
+                                     child: _leftDockIndex == 0 ? const BrowserDock() : _buildAssetsDock(ref),
+                                 ),
+                              ),
+                           );
+                        }
+                     );
+                  }
+               ),
+
+               // Right Floating Dock
+               ValueListenableBuilder<bool>(
+                  valueListenable: _isRightDockFloating,
+                  builder: (ctx, isFloating, _) {
+                     if (!isFloating) return const SizedBox.shrink();
+                     return ValueListenableBuilder<Offset>(
+                        valueListenable: _rightDockPos,
+                        builder: (ctx, pos, _) {
+                           return Positioned(
+                              left: pos.dx, top: pos.dy,
+                              child: SizedBox(
+                                 width: 320, height: 600,
+                                 child: DockPanel(
+                                     title: "Propriedades (Flutuante)",
+                                     onTabSelected: (_) {},
+                                     onDetach: () {},
+                                     onDragStart: (_) {},
+                                     onDragUpdate: (d) {
+                                         _rightDockPos.value += d.delta;
+                                         final screenW = MediaQuery.of(context).size.width;
+                                          _showRightSnap.value = _rightDockPos.value.dx > screenW - 350;
+                                     },
+                                     onDragEnd: (_) {
+                                         if (_showRightSnap.value) {
+                                            _isRightDockFloating.value = false;
+                                            _showRightSnap.value = false;
+                                            _rightDockPos.value = const Offset(800, 100);
+                                         }
+                                     },
+                                     child: _buildRightDock(context, ref, state),
+                                 ),
+                              ),
+                           );
+                        }
+                     );
+                  }
+               ),
+
+               // Bottom Floating Dock
+               ValueListenableBuilder<bool>(
+                  valueListenable: _isBottomDockFloating,
+                  builder: (ctx, isFloating, _) {
+                     if (!isFloating) return const SizedBox.shrink();
+                     return ValueListenableBuilder<Offset>(
+                        valueListenable: _bottomDockPos,
+                        builder: (ctx, pos, _) {
+                           return Positioned(
+                              left: pos.dx, top: pos.dy,
+                              child: SizedBox(
+                                 width: 800, height: 250,
+                                 child: DockPanel(
+                                     title: "Linha do Tempo (Flutuante)",
+                                     onTabSelected: (_) {},
+                                      onDetach: () {},
+                                     onDragStart: (_) {},
+                                     onDragUpdate: (d) {
+                                         _bottomDockPos.value += d.delta;
+                                         final screenH = MediaQuery.of(context).size.height;
+                                         _showBottomSnap.value = _bottomDockPos.value.dy > screenH - 300;
+                                     },
+                                     onDragEnd: (_) {
+                                         if (_showBottomSnap.value) {
+                                            _isBottomDockFloating.value = false;
+                                            _showBottomSnap.value = false;
+                                            _bottomDockPos.value = const Offset(300, 500);
+                                         }
+                                     },
+                                     child: _buildThumbnails(ref, state),
+                                 ),
+                              ),
+                           );
+                        }
+                     );
+                  }
+               ),
+
+                // --- Snap Highlights ---
+                ValueListenableBuilder<bool>(
+                   valueListenable: _showLeftSnap,
+                   builder: (ctx, show, _) => show ? Positioned(
+                      left: 0, top: 0, bottom: 0, width: 50,
+                      child: Container(color: Colors.blueAccent.withOpacity(0.3))
+                   ) : const SizedBox.shrink(),
+                ),
+                ValueListenableBuilder<bool>(
+                   valueListenable: _showRightSnap,
+                   builder: (ctx, show, _) => show ? Positioned(
+                      right: 0, top: 0, bottom: 0, width: 50,
+                      child: Container(color: Colors.blueAccent.withOpacity(0.3))
+                   ) : const SizedBox.shrink(),
+                ),
+                ValueListenableBuilder<bool>(
+                   valueListenable: _showBottomSnap,
+                   builder: (ctx, show, _) => show ? Positioned(
+                      left: 0, right: 0, bottom: 0, height: 50,
+                      child: Container(color: Colors.blueAccent.withOpacity(0.3))
+                   ) : const SizedBox.shrink(),
+                ),
              ],
           ),
         ),
       ),
     );
   }
+
 
 
   // --- Rapid Diagramming ---
@@ -680,7 +922,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
 
   void _showBatchEditor(BuildContext context) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (context) => const BatchEditorView())
+      MaterialPageRoute(builder: (context) => BatchEditorView())
     );
   }
 
@@ -987,70 +1229,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   }
 
 
-  Widget _buildLeftDock(WidgetRef ref) {
-    return Container(
-      width: 250,
-      decoration: BoxDecoration(
-        color: const Color(0xFF0A0A0A),
-        border: Border(
-           right: BorderSide(color: Color(0xFF262626)),
-        ),
-      ),
-      child: Column(
-        children: [
-          Container(
-            height: 40,
-            decoration: BoxDecoration(
-              color: const Color(0xFF000000),
-              border: Border(bottom: BorderSide(color: Color(0xFF262626))),
-            ),
-            child: Row(
-              children: [
-                _buildDockTab("Fotos", 0),
-                _buildDockTab("Assets", 1),
-                _buildDockTab("Fundos", 2),
-              ],
-            ),
-          ),
-          Expanded(
-            child: _leftDockIndex == 0 
-              ? _buildFileBrowser(ref) 
-              : (_leftDockIndex == 1 ? _buildAssetLibrary(ref) : _buildBackgroundLibrary(ref)),
-          ),
-          const Divider(height: 1, color: Colors.white12),
-          const TaskQueueIndicator(), // Background Tasks
-        ],
-      ),
-    );
-  }
 
-  Widget _buildDockTab(String title, int index) {
-    bool isSelected = _leftDockIndex == index;
-    return Expanded(
-      child: InkWell(
-        onTap: () => setState(() => _leftDockIndex = index),
-        child: Container(
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(
-                color: isSelected ? Colors.amberAccent : Colors.transparent,
-                width: 2,
-              ),
-            ),
-          ),
-          child: Text(
-            title,
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-              color: isSelected ? Colors.white : Colors.white54,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 
 
 // ... existing code ...
@@ -1399,6 +1578,19 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         ],
       ),
     );
+  }
+
+  Widget _buildLeftDock(WidgetRef ref) {
+    return _buildFileBrowser(ref);
+  }
+
+  Widget _buildAssetsDock(WidgetRef ref) {
+     final projectState = ref.watch(projectProvider);
+     // If index is 1 (Assets) or 2 (Backgrounds) - wait, DockPanel handles tabs differently
+     // "Fotos", "Assets" -> 0, 1.
+     // Old logic had "Fundos" as 2.
+     // For now, let's just return AssetLibrary.
+    return _buildAssetLibrary(ref);
   }
 
   Widget _buildFileBrowser(WidgetRef ref) {

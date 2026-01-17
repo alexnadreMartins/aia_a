@@ -3,6 +3,8 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:exif/exif.dart';
+import 'package:face_detection_tflite/face_detection_tflite.dart';
+import 'dart:typed_data';
 
 // TOP LEVEL FUNCTIONS (Must be outside class for compute)
 
@@ -10,7 +12,7 @@ Future<_PhotoMeta?> _getMetadataTask(String path) async {
     try {
       final file = File(path);
       // Fast path: File Mod Time if EXIF fails
-      DateTime date = file.lastModifiedSync(); // Sync in isolate is fine
+      DateTime date = file.lastModifiedSync(); 
       
       try {
         final bytes = file.readAsBytesSync();
@@ -41,14 +43,10 @@ Future<double> _calculateScoreTask(String path) async {
        final size = await file.length();
        
        final bytes = await file.readAsBytes();
-       // Decode
        final image = img.decodeImage(bytes);
        if (image == null) return size.toDouble(); 
 
-       // Optimization: 
-       // 1. Resize to 720px
-       // 2. Center Crop 60%
-       
+       // Optimization: Resize to 720px & Center Crop
        img.Image diffImage = image;
        if (image.width > 720) {
           diffImage = img.copyResize(image, width: 720);
@@ -62,12 +60,11 @@ Future<double> _calculateScoreTask(String path) async {
           height: (diffImage.height * 0.6).toInt()
        );
        
-       // Gray
        final grayscale = img.grayscale(cropped);
-       
        double variance = _laplacianVariance(grayscale);
        
-       double sizeScore = size / (1024 * 1024); // MB
+       // Score = Variance (Sharpness) + Size (Mbps bonus)
+       double sizeScore = size / (1024 * 1024); 
        double sharpScore = variance / 10.0; 
        
        return (sharpScore) + (sizeScore * 0.5);
@@ -83,11 +80,10 @@ double _laplacianVariance(img.Image image) {
      double sumSq = 0;
      int count = 0;
      
-     // Skip borders
      for (int y = 1; y < image.height - 1; y++) {
         for (int x = 1; x < image.width - 1; x++) {
            final p = image.getPixel(x, y);
-           final lum = p.r; // Grayscale r=g=b
+           final lum = p.r;
            
            final p_up = image.getPixel(x, y-1).r;
            final p_down = image.getPixel(x, y+1).r;
@@ -116,12 +112,9 @@ class AutoSelectEngine {
   }) async {
     if (allPaths.isEmpty) return [];
 
-    // 1. Get Metadata (Parallel)
-    List<_PhotoMeta> metas = [];
-    
-    onProgress?.call("Lendo Metadados (Multi-Core)...", 0, allPaths.length, 0);
+    // 1. Get Metadata
+    onProgress?.call("Lendo Metadados...", 0, allPaths.length, 0);
 
-    // Parallelize in chunks of 8
     final metaResults = await _processInBatches(
       allPaths, 
       (path) => compute(_getMetadataTask, path),
@@ -129,13 +122,10 @@ class AutoSelectEngine {
       onProgress: (done) => onProgress?.call("Lendo Metadados...", done, allPaths.length, 0)
     );
     
-    for (var m in metaResults) {
-      if (m != null) metas.add(m);
-    }
+    List<_PhotoMeta> metas = [];
+    for (var m in metaResults) if (m != null) metas.add(m);
     
-    onProgress?.call("Agrupando...", allPaths.length, allPaths.length, 0);
-
-    // 2. Sort & Group (Fast enough on main thread)
+    // 2. Sort & Group
     metas.sort((a, b) => a.dateTaken.compareTo(b.dateTaken));
 
     List<List<_PhotoMeta>> groups = [];
@@ -155,27 +145,24 @@ class AutoSelectEngine {
       groups.add(currentGroup);
     }
 
-    // 3. Analyze Groups (Parallel)
+    // 3. Analyze Groups
     List<String> winners = [];
-    int processedPhotos = 0;
-    
-    // Flatten list of photos that need scoring (groups > 1)
-    // Actually, we process Groups. If group size > 1, all photos in it need scoring.
-    // If we score ALL photos in parallel first, it's faster than doing it per group.
-    
     List<_PhotoMeta> photosToScore = [];
+    
+    // Identify photos that need scoring
     for (var g in groups) {
       if (g.length > 1) {
         photosToScore.addAll(g);
       } else {
-        winners.add(g[0].path); // Singletons automatically win
+        winners.add(g[0].path); 
       }
     }
     
-    // Run scoring on photosToScore
     Map<String, double> scores = {};
+    
     if (photosToScore.isNotEmpty) {
-       onProgress?.call("Analisando Detalhes (Multi-Core)...", 0, photosToScore.length, winners.length);
+       // A. Calculate Sharpness First (Base Score)
+       onProgress?.call("Analisando Nitidez...", 0, photosToScore.length, winners.length);
        
        final scoreResults = await _processInBatches(
           photosToScore,
@@ -183,26 +170,99 @@ class AutoSelectEngine {
              final s = await compute(_calculateScoreTask, meta.path);
              return MapEntry(meta.path, s);
           },
-          concurrency: 6, // Heavy task, keep slightly lower than 8 to avoid UI freeze completely
-          onProgress: (done) => onProgress?.call("Analisando...", done, photosToScore.length, winners.length)
+          concurrency: 6, 
+          onProgress: (done) => onProgress?.call("Analisando Nitidez...", done, photosToScore.length, winners.length)
        );
        
+       Map<String, double> sharpnessMap = {};
        for (var entry in scoreResults) {
-          scores[entry.key] = entry.value;
+          sharpnessMap[entry.key] = entry.value;
+          scores[entry.key] = entry.value; // Init score with sharpness
+       }
+
+       // B. Face Detection (Only for Closed Eyes Check)
+       // We only check the TOP 3 candidates per group to safe time.
+       Set<String> candidatesForFaceCheck = {};
+       
+       for (var g in groups) {
+          if (g.length <= 1) continue;
+          // Sort by sharpness
+          g.sort((a, b) => (sharpnessMap[b.path] ?? 0).compareTo(sharpnessMap[a.path] ?? 0));
+          
+          // Take Top 3
+          int take = g.length > 3 ? 3 : g.length;
+          for(int k=0; k<take; k++) {
+             candidatesForFaceCheck.add(g[k].path);
+          }
+       }
+
+       if (candidatesForFaceCheck.isNotEmpty) {
+           onProgress?.call("Verificando Olhos...", 0, candidatesForFaceCheck.length, winners.length);
+           
+           final faceDetector = FaceDetector();
+           await faceDetector.initialize(model: FaceDetectionModel.backCamera);
+           
+           int fLimit = 0;
+           List<_PhotoMeta> faceBatch = photosToScore.where((p) => candidatesForFaceCheck.contains(p.path)).toList();
+           
+           for (var meta in faceBatch) {
+               fLimit++;
+               await Future.delayed(Duration.zero); 
+               
+               try {
+                  final file = File(meta.path);
+                  final bytes = await file.readAsBytes();
+                  // Use Standard mode for Mesh (EAR)
+                  final faces = await faceDetector.detectFaces(
+                      bytes, 
+                      mode: FaceDetectionMode.standard 
+                  );
+                  
+                  if (faces.isNotEmpty) {
+                     // Check largest face
+                     Face? largest;
+                     double maxArea = 0;
+                     for (var f in faces) {
+                        double area = f.bbox.width * f.bbox.height;
+                        if (area > maxArea) {
+                           maxArea = area;
+                           largest = f;
+                        }
+                     }
+                     
+                     if (largest != null && largest.mesh.length >= 468) {
+                        // Calculate EAR
+                        bool leftOpen = _isEyeOpen(largest.mesh, 33, 133, 159, 145);
+                        bool rightOpen = _isEyeOpen(largest.mesh, 362, 263, 386, 374);
+                        
+                        if (!leftOpen || !rightOpen) {
+                           // PENALTY: Reduce score significantly
+                           double currentScore = scores[meta.path] ?? 0;
+                           scores[meta.path] = currentScore - 50.0; 
+                        }
+                     }
+                  }
+               } catch (e) {
+                  // ignore
+               }
+               
+               onProgress?.call("Verificando Olhos...", fLimit, faceBatch.length, winners.length);
+           }
+           faceDetector.dispose();
        }
     }
 
-    // Resolve Winners
+    // 4. Resolve Winners
     for (var g in groups) {
       if (g.length > 1) {
          String best = g[0].path;
-         double bestScore = -1;
+         double bestScore = -99999;
          
          for (var p in g) {
             double s = scores[p.path] ?? 0.0;
             if (s > bestScore) {
-               bestScore = s;
-               best = p.path;
+                bestScore = s;
+                best = p.path;
             }
          }
          winners.add(best);
@@ -217,50 +277,17 @@ class AutoSelectEngine {
     Future<R> Function(T) worker, 
     {required int concurrency, Function(int done)? onProgress}
   ) async {
-    List<Future<R>> active = [];
     List<R> results = [];
     int i = 0;
-    
-    while (i < items.length || active.isNotEmpty) {
-       // Fill pool
-       while (active.length < concurrency && i < items.length) {
-          final item = items[i];
-          // We wrap the future to know which one finished? 
-          // Actually simplest is just wait for ANY to finish.
-          // But Future.any returns the value, not the index.
-          
-          // Better approach: Use a pool loop.
-          // But to keep simple order, we can just push all and wait? No, heavy memory.
-          
-          // Let's execute and append to active.
-          active.add(worker(item));
-          i++;
-       }
-       
-       if (active.isEmpty) break;
-
-       // Wait for at least one to finish to make room?
-       // Future.wait(active) waits for ALL.
-       // We want a sliding window.
-       
-       // Quick and dirty sliding window:
-       // Just split into chunks.
-       // It's less efficient if one task is slow, but much simpler code.
-       // The user said "use more power", chunks use 100% power of N threads until chunk ensures.
-       // Let's use Chunking.
-       break; // Switch to simpler chunk Logic below
-    }
-    
-    // Chunk Implementation
-    results = [];
-    for (var j = 0; j < items.length; j += concurrency) {
-       int end = (j + concurrency < items.length) ? j + concurrency : items.length;
-       final chunk = items.sublist(j, end);
+    while (i < items.length) {
+       int end = (i + concurrency < items.length) ? i + concurrency : items.length;
+       final chunk = items.sublist(i, end);
        final chunkFutures = chunk.map((item) => worker(item));
-       
        final chunkResults = await Future.wait(chunkFutures);
        results.addAll(chunkResults);
+       i += concurrency;
        onProgress?.call(results.length);
+       await Future.delayed(Duration(milliseconds: 5)); 
     }
     return results;
   }
@@ -271,4 +298,22 @@ class _PhotoMeta {
    final String path;
    final DateTime dateTaken;
    _PhotoMeta(this.path, this.dateTaken);
+}
+
+bool _isEyeOpen(List<Point<double>> mesh, int left, int right, int top, int bottom) {
+    if (mesh.length <= max(max(left, right), max(top, bottom))) return true;
+    
+    // Vertical / Horizontal Ratio (Inverse EAR roughly)
+    final pL = mesh[left];
+    final pR = mesh[right];
+    final pT = mesh[top];
+    final pB = mesh[bottom];
+    
+    double hDist = sqrt(pow(pR.x - pL.x, 2) + pow(pR.y - pL.y, 2));
+    double vDist = sqrt(pow(pB.x - pT.x, 2) + pow(pB.y - pT.y, 2));
+    
+    if (hDist == 0) return true;
+    
+    double ratio = vDist / hDist;
+    return ratio > 0.18; // > 0.18 considers open. < 0.18 is blink.
 }
