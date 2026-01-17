@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:async';
 import 'dart:math' as math;
 import 'widgets/full_screen_viewer.dart';
 import 'widgets/browser_full_screen_viewer.dart';
@@ -1098,6 +1099,13 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
             onSelected: (value) async {
                   if (value == 'batch_export') {
                      _showBatchExportDialog(context);
+                  } else if (value == 'sinc_files') {
+                     await ref.read(projectProvider.notifier).syncAll();
+                     if (context.mounted) {
+                       ScaffoldMessenger.of(context).showSnackBar(
+                         const SnackBar(content: Text("Arquivos originais sincronizados com sucesso!"))
+                       );
+                     }
                   } else if (value == 'batch_editor') {
                      _showBatchEditor(context);
                   } else if (value == 'auto_diagram') {
@@ -2135,7 +2143,21 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                           final localPos = box.globalToLocal(details.offset);
                           final data = details.data;
                           if (data is String) {
-                            _handleDrop(ref, localPos, [data], currentPage);
+                            final pagePhotos = currentPage.photos;
+                            final bool isId = pagePhotos.any((p) => p.id == data);
+
+                            if (isId) {
+                                // Drag-to-Move logic (Touchpad/Touch support)
+                                final photo = pagePhotos.firstWhere((p) => p.id == data);
+                                ref.read(projectProvider.notifier).updatePhoto(photo.id, (p) => p.copyWith(
+                                    x: localPos.dx - p.width / 2,
+                                    y: localPos.dy - p.height / 2,
+                                ));
+                                ref.read(projectProvider.notifier).saveHistorySnapshot();
+                            } else {
+                                // Existing path logic (Import/Swap)
+                                _handleDrop(ref, localPos, [data], currentPage);
+                            }
                           } else if (data is LibraryAsset) {
                             _handleAssetDrop(ref, localPos, data, currentPage);
                           }
@@ -2573,7 +2595,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                          if (!isSelected) {
                              ref.read(projectProvider.notifier).setPageIndex(index);
                              ref.read(projectProvider.notifier).clearPageSelection();
-                         }
+                          }
                          
                          final multiCount = state.multiSelectedPages.length;
                          final deleteLabel = multiCount > 1 ? "Excluir $multiCount Páginas" : "Excluir Página";
@@ -3240,7 +3262,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
            // Load Project
            await ref.read(projectProvider.notifier).loadProject(pPath);
            
-           // Wait for load settle
+           // SYNC FILES BEFORE EXPORT (CRITICAL FOR ROTATIONS & RELINKING)
+           await ref.read(projectProvider.notifier).syncAll();
+           
+           // Wait for load/sync settle
            await Future.delayed(const Duration(seconds: 2));
            
            final state = ref.read(projectProvider);
@@ -3809,5 +3834,6 @@ class _NewProjectDialogState extends State<_NewProjectDialog> {
     );
   }
 }
+
 
 

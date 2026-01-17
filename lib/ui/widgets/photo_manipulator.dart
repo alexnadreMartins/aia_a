@@ -120,7 +120,6 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
     final angle = photo.rotation * (math.pi / 180);
 
     // Draggable / Swap Logic
-    // Draggable / Swap Logic
     return Positioned(
       left: photo.x,
       top: photo.y,
@@ -142,7 +141,7 @@ class _PhotoManipulatorState extends ConsumerState<PhotoManipulator> {
 
             return LongPressDraggable<String>(
               data: photo.id,
-              delay: const Duration(seconds: 2), 
+              delay: const Duration(milliseconds: 2000), 
               feedback: Material(
                  elevation: 8,
                  color: Colors.transparent,
@@ -502,22 +501,17 @@ class PhotoPainter extends CustomPainter {
     double imgW = image!.width.toDouble();
     double imgH = image!.height.toDouble();
 
-    // CRASH GUARD: Invalid Dimensions
     if (imgW <= 0 || imgH <= 0 || size.width <= 0 || size.height <= 0) return;
     
-    // EXIF Orientation check
     final int orient = photo.exifOrientation;
     final int manualRot = globalRotation;
     
-    // Total logical rotation = EXIF + Manual
-    // We handle them by rotating the canvas, but we need correct un-rotated dimensions for scale
-    
-    final bool isExifRotated = orient == 6 || orient == 8 || orient == 5 || orient == 7;
+    // Swap dimensions for scale calculation if the image is logically rotated 90/270
+    // EXIF orientations 5, 6, 7, 8 involve a 90 or 270 degree rotation.
+    final bool isExifRotated = orient >= 5 && orient <= 8;
     final bool isManualRotated = manualRot == 90 || manualRot == 270;
     
-    // If only one is rotated, we swap. If both or neither, we don't.
     if (isExifRotated ^ isManualRotated) {
-      // Swap dimensions for scale calculation
       final temp = imgW;
       imgW = imgH;
       imgH = temp;
@@ -526,25 +520,51 @@ class PhotoPainter extends CustomPainter {
     final double scale0 = math.max(size.width / imgW, size.height / imgH);
     final double finalScale = scale0 * photo.contentScale;
 
+    // Helper to apply transformations inside save/restore blocks
+    void applyOrientations(Canvas canvas) {
+        // EXIF Handling (Reference: http://sylvana.net/jpegcrop/exif_orientation.html)
+        switch (orient) {
+          case 2: // Mirror horizontal
+            canvas.scale(-1, 1);
+            break;
+          case 3: // Rotate 180
+            canvas.rotate(math.pi);
+            break;
+          case 4: // Mirror vertical
+            canvas.scale(1, -1);
+            break;
+          case 5: // Mirror horizontal and rotate 270 CW
+            canvas.rotate(-math.pi / 2);
+            canvas.scale(-1, 1);
+            break;
+          case 6: // Rotate 90 CW
+            canvas.rotate(math.pi / 2);
+            break;
+          case 7: // Mirror horizontal and rotate 90 CW
+            canvas.rotate(math.pi / 2);
+            canvas.scale(-1, 1);
+            break;
+          case 8: // Rotate 270 CW
+            canvas.rotate(-math.pi / 2);
+            break;
+          default: // 1 or unknown: Normal
+            break;
+        }
+
+        // Apply Manual Rotation (Global/Browser Rotation)
+        if (manualRot != 0) {
+          canvas.rotate((math.pi / 180) * manualRot);
+        }
+    }
+
     // 2. Draw Ghosting (Full image dimmed) if editing
     if (isEditingContent) {
        canvas.save();
        canvas.translate(size.width/2, size.height/2);
        canvas.translate(-photo.contentX * (imgW * finalScale / 2), -photo.contentY * (imgH * finalScale / 2));
-       
-        // Apply EXIF Rotation
-        if (orient == 6) canvas.rotate(math.pi / 2);
-        else if (orient == 3) canvas.rotate(math.pi);
-        else if (orient == 8) canvas.rotate(-math.pi / 2);
-
-        // Apply Manual Rotation
-        if (manualRot != 0) {
-          canvas.rotate((math.pi / 180) * manualRot);
-        }
-
+       applyOrientations(canvas);
        canvas.scale(finalScale);
        paint.color = Colors.black.withOpacity(0.3);
-       // Note: imgW/imgH here are native (unswapped) for drawing
        canvas.drawImage(image!, Offset(-image!.width / 2, -image!.height / 2), paint);
        canvas.restore();
     }
@@ -554,17 +574,7 @@ class PhotoPainter extends CustomPainter {
     canvas.clipRect(Offset.zero & size);
     canvas.translate(size.width/2, size.height/2);
     canvas.translate(-photo.contentX * (imgW * finalScale / 2), -photo.contentY * (imgH * finalScale / 2));
-    
-    // Apply EXIF Rotation
-    if (orient == 6) canvas.rotate(math.pi / 2);
-    else if (orient == 3) canvas.rotate(math.pi);
-    else if (orient == 8) canvas.rotate(-math.pi / 2);
-
-    // Apply Manual Rotation
-    if (manualRot != 0) {
-      canvas.rotate((math.pi / 180) * manualRot);
-    }
-
+    applyOrientations(canvas);
     canvas.scale(finalScale);
 
     paint.color = Colors.white;

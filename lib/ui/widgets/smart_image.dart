@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import '../../state/project_state.dart';
+import '../../logic/cache_provider.dart';
 
 class SmartImage extends ConsumerWidget {
   final String path;
@@ -21,22 +22,46 @@ class SmartImage extends ConsumerWidget {
     if (path.isEmpty) return const SizedBox();
 
     final projectState = ref.watch(projectProvider);
+    final version = ref.watch(imageVersionProvider(path));
     final file = File(path);
     
+    // 3. Apply Local Rotation
+    final rotation = projectState.project.imageRotations[path] ?? 0;
+    
+    Widget wrapRotation(Widget child) {
+       if (rotation == 0) return child;
+       return RotatedBox(
+         quarterTurns: (rotation / 90).round(),
+         child: child,
+       );
+    }
+
     // 1. Try Original
     if (file.existsSync()) {
-       return Image.file(file, fit: fit, errorBuilder: (_,__,___) => errorBuilder ?? const SizedBox());
+       return wrapRotation(Image.file(
+         file, 
+         key: ValueKey('${path}_$version'), // Rebuild widget
+         fit: fit, 
+         errorBuilder: (_,__,___) => errorBuilder ?? const SizedBox()
+       ));
     }
     
     // 2. Try Proxy
     if (projectState.proxyRoot != null) {
        final filename = p.basename(path);
-       final proxyFile = File(p.join(projectState.proxyRoot!, filename));
+       final proxyPath = p.join(projectState.proxyRoot!, filename);
+       final proxyFile = File(proxyPath);
        if (proxyFile.existsSync()) {
-          return Stack(
+          final pVersion = ref.watch(imageVersionProvider(proxyPath));
+          return wrapRotation(Stack(
             fit: StackFit.expand,
             children: [
-               Image.file(proxyFile, fit: fit, errorBuilder: (_,__,___) => errorBuilder ?? const SizedBox()),
+               Image.file(
+                 proxyFile, 
+                 key: ValueKey('${proxyPath}_$pVersion'),
+                 fit: fit, 
+                 errorBuilder: (_,__,___) => errorBuilder ?? const SizedBox()
+               ),
                // Mini Cloud Icon for Thumbnails
                Positioned(
                  top: 1, right: 1,
@@ -47,7 +72,7 @@ class SmartImage extends ConsumerWidget {
                  ),
                )
             ],
-          );
+          ));
        }
     }
     

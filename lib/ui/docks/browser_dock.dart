@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io';
+import 'dart:async';
 
 import '../../state/project_state.dart';
 import '../../models/project_model.dart';
@@ -41,106 +42,181 @@ class _BrowserDockState extends ConsumerState<BrowserDock> {
     // Get Sorted/Filtered List computed by Notifier logic
     final displayedPaths = notifier.getSortedAndFilteredPaths();
 
-    return Column(
-      children: [
-        _buildBrowserToolbar(ref, projectState),
-        Expanded(
-          child: CallbackShortcuts(
-            bindings: {
-              const SingleActivator(LogicalKeyboardKey.keyA, control: true): () => 
-                  notifier.selectAllBrowserPhotos(),
-              const SingleActivator(LogicalKeyboardKey.keyD, control: true): () => 
-                  notifier.deselectAllBrowserPhotos(),
-            },
-            child: Focus(
-              autofocus: true,
-              child: Scrollbar(
-                controller: _browserScrollCtrl,
-                thumbVisibility: true,
-                thickness: 12,
-                radius: const Radius.circular(6),
-                interactive: true,
-                child: GridView.builder(
-                  controller: _browserScrollCtrl,
-                  padding: const EdgeInsets.all(8),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
-                  crossAxisSpacing: 4,
-                  mainAxisSpacing: 4,
-                ),
-                itemCount: displayedPaths.length,
-                itemBuilder: (ctx, i) {
-                  final path = displayedPaths[i];
-                  final isSelected = projectState.selectedBrowserPaths.contains(path);
-                  final rot = projectState.project.imageRotations[path] ?? 0;
-                  final version = ref.watch(imageVersionProvider(path)); // Watch version
-
-                  return Draggable<String>(
-                    data: path,
-                    feedback: Opacity(
-                      opacity: 0.7,
-                      child: SizedBox(
-                        width: 60, height: 60,
-                        child: RotatedBox(quarterTurns: rot ~/ 90, child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain)),
+    return DragTarget<String>(
+      onWillAccept: (data) {
+        _stopAutoScroll(); // Safety
+        return data != null; // Accept any string (path)
+      },
+      onMove: (details) {
+         // This fires continuously while dragging over the target!
+         final RenderBox box = context.findRenderObject() as RenderBox;
+         final localPos = box.globalToLocal(details.offset);
+         final height = box.size.height;
+         
+         const double zoneSize = 80.0; // Larger zone for easier control
+         double speed = 0;
+         
+         // Top Zone
+         if (localPos.dy < zoneSize) {
+             // Speed increases as we get closer to 0 (top edge)
+             // If localPos.dy is 0, ratio is 1. Speed max.
+             // If localPos.dy is 80, ratio is 0. Speed 0.
+             final ratio = (zoneSize - localPos.dy) / zoneSize;
+             speed = -20 * ratio; // Max speed -20
+         } 
+         // Bottom Zone
+         else if (localPos.dy > height - zoneSize) {
+             // If localPos.dy is height, ratio is 1.
+             // If localPos.dy is height-80, ratio is 0.
+             final ratio = (localPos.dy - (height - zoneSize)) / zoneSize;
+             speed = 20 * ratio;
+         }
+         else {
+             // Middle Zone (Safe) - Stop scrolling immediately if we enter here
+             _stopAutoScroll();
+             return;
+         }
+         
+         if (speed != 0) {
+            _startAutoScroll(speed);
+         }
+      },
+      onLeave: (_) => _stopAutoScroll(),
+      onAccept: (_) {
+         _stopAutoScroll();
+         // Does not handle drop logic here, assuming draggable handles it or individual items
+      },
+      builder: (context, candidateData, rejectedData) {
+        return Column(
+          children: [
+            _buildBrowserToolbar(ref, projectState),
+            Expanded(
+              child: CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.keyA, control: true): () => 
+                      notifier.selectAllBrowserPhotos(),
+                  const SingleActivator(LogicalKeyboardKey.keyD, control: true): () => 
+                      notifier.deselectAllBrowserPhotos(),
+                },
+                child: Focus(
+                  autofocus: true,
+                  child: Scrollbar(
+                    controller: _browserScrollCtrl,
+                    thumbVisibility: true,
+                    thickness: 12,
+                    radius: const Radius.circular(6),
+                    interactive: true,
+                    child: GridView.builder(
+                      controller: _browserScrollCtrl,
+                      padding: const EdgeInsets.all(8),
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3,
+                        crossAxisSpacing: 4,
+                        mainAxisSpacing: 4,
                       ),
-                    ),
-                    child: GestureDetector(
-                      onTap: () {
-                           final isShiftPressed = HardwareKeyboard.instance.logicalKeysPressed
-                               .contains(LogicalKeyboardKey.shiftLeft) ||
-                               HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
-                           
-                           if (isShiftPressed && _lastSelectedBrowserPath != null) {
-                               notifier.selectBrowserRange(_lastSelectedBrowserPath!, path, displayedPaths);
-                           } else {
-                               notifier.toggleBrowserPathSelection(path);
-                               _lastSelectedBrowserPath = path;
-                           }
-                      },
-                      onDoubleTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => BrowserFullScreenViewer(paths: displayedPaths, initialIndex: i)),
-                        );
-                      },
-                      onSecondaryTapUp: (details) {
-                          _showBrowserContextMenu(context, ref, path, details.globalPosition);
-                      },
-                      child: Stack(
-                        children: [
-                          Container(
-                            decoration: BoxDecoration(
-                              color: isSelected ? Colors.deepPurple.withOpacity(0.3) : const Color(0xFF1A1A1A),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(
-                                color: isSelected ? Colors.deepPurpleAccent : Colors.transparent,
-                                width: isSelected ? 2 : 1,
-                              ),
-                            ),
-                            padding: const EdgeInsets.all(4),
-                            child: Center(
-                              child: RotatedBox(
-                                quarterTurns: rot ~/ 90,
-                                child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain),
-                              ),
+                      itemCount: displayedPaths.length,
+                      itemBuilder: (ctx, i) {
+                        final path = displayedPaths[i];
+                        final isSelected = projectState.selectedBrowserPaths.contains(path);
+                        final rot = projectState.project.imageRotations[path] ?? 0;
+                        final version = ref.watch(imageVersionProvider(path)); // Watch version
+
+                        return Draggable<String>(
+                          data: path,
+                          // onDragEnd is NOT reliable for stopping invalid scrolls if we drop elsewhere.
+                          // Rely on DragTarget.onLeave or onMove to stop.
+                          feedback: Opacity(
+                            opacity: 0.7,
+                            child: SizedBox(
+                              width: 60, height: 60,
+                              child: RotatedBox(quarterTurns: rot ~/ 90, child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain)),
                             ),
                           ),
-                          if (isSelected)
-                            const Positioned(
-                              bottom: 4, right: 4,
-                              child: Icon(Icons.check_circle, size: 14, color: Colors.deepPurpleAccent),
+                          child: GestureDetector(
+                            onTap: () {
+                                final isShiftPressed = HardwareKeyboard.instance.logicalKeysPressed
+                                    .contains(LogicalKeyboardKey.shiftLeft) ||
+                                    HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+                                
+                                if (isShiftPressed && _lastSelectedBrowserPath != null) {
+                                    notifier.selectBrowserRange(_lastSelectedBrowserPath!, path, displayedPaths);
+                                } else {
+                                    notifier.toggleBrowserPathSelection(path);
+                                    _lastSelectedBrowserPath = path;
+                                }
+                            },
+                            onDoubleTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => BrowserFullScreenViewer(paths: displayedPaths, initialIndex: i)),
+                              );
+                            },
+                            onSecondaryTapUp: (details) {
+                                _showBrowserContextMenu(context, ref, path, details.globalPosition);
+                            },
+                            child: Stack(
+                              children: [
+                                Container(
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? Colors.deepPurple.withOpacity(0.3) : const Color(0xFF1A1A1A),
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: Border.all(
+                                      color: isSelected ? Colors.deepPurpleAccent : Colors.transparent,
+                                      width: isSelected ? 2 : 1,
+                                    ),
+                                  ),
+                                  padding: const EdgeInsets.all(4),
+                                  child: Center(
+                                    child: RotatedBox(
+                                      quarterTurns: rot ~/ 90,
+                                      child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain),
+                                    ),
+                                  ),
+                                ),
+                                if (isSelected)
+                                  const Positioned(
+                                    bottom: 4, right: 4,
+                                    child: Icon(Icons.check_circle, size: 14, color: Colors.deepPurpleAccent),
+                                  ),
+                              ],
                             ),
-                        ],
-                      ),
+                          ),
+                        );
+                      },
                     ),
-                  );
-                },
+                  ), // Scrollbar
+                ),
               ),
-              ), // Scrollbar
             ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
+  }
+  
+  // AutoScroll Implementation
+  Timer? _autoScrollTimer;
+  
+  void _startAutoScroll(double velocity) {
+     _autoScrollTimer?.cancel();
+     _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+         if (!_browserScrollCtrl.hasClients) {
+            timer.cancel();
+            return;
+         }
+         
+         double newPos = _browserScrollCtrl.offset + velocity;
+         if (newPos < 0) newPos = 0;
+         if (newPos > _browserScrollCtrl.position.maxScrollExtent) newPos = _browserScrollCtrl.position.maxScrollExtent;
+         
+         if (newPos != _browserScrollCtrl.offset) {
+            _browserScrollCtrl.jumpTo(newPos);
+         }
+     });
+  }
+  
+  void _stopAutoScroll() {
+     _autoScrollTimer?.cancel();
+     _autoScrollTimer = null;
   }
 
   Widget _buildBrowserToolbar(WidgetRef ref, PhotoBookState state) {

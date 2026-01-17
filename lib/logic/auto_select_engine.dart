@@ -3,8 +3,10 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 import 'package:exif/exif.dart';
-import 'package:face_detection_tflite/face_detection_tflite.dart';
+// import 'package:face_detection_tflite/face_detection_tflite.dart'; // REMOVED
 import 'dart:typed_data';
+
+// TOP LEVEL FUNCTIONS (Must be outside class for compute)
 
 // TOP LEVEL FUNCTIONS (Must be outside class for compute)
 
@@ -115,10 +117,11 @@ class AutoSelectEngine {
     // 1. Get Metadata
     onProgress?.call("Lendo Metadados...", 0, allPaths.length, 0);
 
+    // Concurrency Boost: Increased to 12
     final metaResults = await _processInBatches(
       allPaths, 
       (path) => compute(_getMetadataTask, path),
-      concurrency: 8,
+      concurrency: 12, 
       onProgress: (done) => onProgress?.call("Lendo Metadados...", done, allPaths.length, 0)
     );
     
@@ -164,91 +167,19 @@ class AutoSelectEngine {
        // A. Calculate Sharpness First (Base Score)
        onProgress?.call("Analisando Nitidez...", 0, photosToScore.length, winners.length);
        
+       // Concurrency Boost: Increased to 12 for maximum CPU utilization
        final scoreResults = await _processInBatches(
           photosToScore,
           (meta) async {
              final s = await compute(_calculateScoreTask, meta.path);
              return MapEntry(meta.path, s);
           },
-          concurrency: 6, 
+          concurrency: 12, 
           onProgress: (done) => onProgress?.call("Analisando Nitidez...", done, photosToScore.length, winners.length)
        );
        
-       Map<String, double> sharpnessMap = {};
        for (var entry in scoreResults) {
-          sharpnessMap[entry.key] = entry.value;
-          scores[entry.key] = entry.value; // Init score with sharpness
-       }
-
-       // B. Face Detection (Only for Closed Eyes Check)
-       // We only check the TOP 3 candidates per group to safe time.
-       Set<String> candidatesForFaceCheck = {};
-       
-       for (var g in groups) {
-          if (g.length <= 1) continue;
-          // Sort by sharpness
-          g.sort((a, b) => (sharpnessMap[b.path] ?? 0).compareTo(sharpnessMap[a.path] ?? 0));
-          
-          // Take Top 3
-          int take = g.length > 3 ? 3 : g.length;
-          for(int k=0; k<take; k++) {
-             candidatesForFaceCheck.add(g[k].path);
-          }
-       }
-
-       if (candidatesForFaceCheck.isNotEmpty) {
-           onProgress?.call("Verificando Olhos...", 0, candidatesForFaceCheck.length, winners.length);
-           
-           final faceDetector = FaceDetector();
-           await faceDetector.initialize(model: FaceDetectionModel.backCamera);
-           
-           int fLimit = 0;
-           List<_PhotoMeta> faceBatch = photosToScore.where((p) => candidatesForFaceCheck.contains(p.path)).toList();
-           
-           for (var meta in faceBatch) {
-               fLimit++;
-               await Future.delayed(Duration.zero); 
-               
-               try {
-                  final file = File(meta.path);
-                  final bytes = await file.readAsBytes();
-                  // Use Standard mode for Mesh (EAR)
-                  final faces = await faceDetector.detectFaces(
-                      bytes, 
-                      mode: FaceDetectionMode.standard 
-                  );
-                  
-                  if (faces.isNotEmpty) {
-                     // Check largest face
-                     Face? largest;
-                     double maxArea = 0;
-                     for (var f in faces) {
-                        double area = f.bbox.width * f.bbox.height;
-                        if (area > maxArea) {
-                           maxArea = area;
-                           largest = f;
-                        }
-                     }
-                     
-                     if (largest != null && largest.mesh.length >= 468) {
-                        // Calculate EAR
-                        bool leftOpen = _isEyeOpen(largest.mesh, 33, 133, 159, 145);
-                        bool rightOpen = _isEyeOpen(largest.mesh, 362, 263, 386, 374);
-                        
-                        if (!leftOpen || !rightOpen) {
-                           // PENALTY: Reduce score significantly
-                           double currentScore = scores[meta.path] ?? 0;
-                           scores[meta.path] = currentScore - 50.0; 
-                        }
-                     }
-                  }
-               } catch (e) {
-                  // ignore
-               }
-               
-               onProgress?.call("Verificando Olhos...", fLimit, faceBatch.length, winners.length);
-           }
-           faceDetector.dispose();
+          scores[entry.key] = entry.value; 
        }
     }
 
@@ -298,22 +229,4 @@ class _PhotoMeta {
    final String path;
    final DateTime dateTaken;
    _PhotoMeta(this.path, this.dateTaken);
-}
-
-bool _isEyeOpen(List<Point<double>> mesh, int left, int right, int top, int bottom) {
-    if (mesh.length <= max(max(left, right), max(top, bottom))) return true;
-    
-    // Vertical / Horizontal Ratio (Inverse EAR roughly)
-    final pL = mesh[left];
-    final pR = mesh[right];
-    final pT = mesh[top];
-    final pB = mesh[bottom];
-    
-    double hDist = sqrt(pow(pR.x - pL.x, 2) + pow(pR.y - pL.y, 2));
-    double vDist = sqrt(pow(pB.x - pT.x, 2) + pow(pB.y - pT.y, 2));
-    
-    if (hDist == 0) return true;
-    
-    double ratio = vDist / hDist;
-    return ratio > 0.18; // > 0.18 considers open. < 0.18 is blink.
 }
