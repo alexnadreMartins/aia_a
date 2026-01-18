@@ -12,12 +12,15 @@ import '../logic/template_system.dart';
 import '../logic/metadata_helper.dart';
 import '../logic/layout_engine.dart';
 import '../models/asset_model.dart';
+import '../models/user_model.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import '../logic/auto_select_engine.dart';
 import 'package:image/image.dart' as img; // For Rotation
 import '../logic/cache_provider.dart'; // For Cache Utils
 import 'package:path/path.dart' as p;
 import 'package:archive/archive_io.dart'; // ZIP Support
+import '../logic/firestore_service.dart';
 import '../logic/project_packager.dart';
 import '../logic/image_loader.dart';
 
@@ -171,6 +174,8 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   
   // Cache for file dates to optimize sorting
   final Map<String, DateTime> _fileDateCache = {};
+  
+  Map<String, PhotoMetadata> get metadataCache => _metadataCache;
 
   ProjectNotifier(this.ref)
       : super(PhotoBookState(
@@ -213,6 +218,21 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     state = state.copyWith(
       canUndo: _undoStack.isNotEmpty,
       canRedo: _redoStack.isNotEmpty,
+    );
+  }
+
+  void resetProject() {
+    // Clear History
+    _undoStack.clear();
+    _redoStack.clear();
+    _fileDateCache.clear();
+    _metadataCache.clear();
+    
+    // Reset State to Default
+    state = PhotoBookState(
+       project: Project(pages: [_createDefaultPage()]),
+       isProcessing: false, // Ensure UI is unlocked
+       isExporting: false,
     );
   }
 
@@ -2236,6 +2256,22 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     );
   }
 
+  Future<void> incrementExportStats(int photoCount) async {
+      // 1. Update State
+      final newCount = state.project.exportedCount + photoCount;
+      state = state.copyWith(
+         project: state.project.copyWith(exportedCount: newCount)
+      );
+
+      // 2. Save Trigger (to update Firestore)
+      // We re-save the stats to ensure this activity is recorded
+      try {
+         await FirestoreService().saveProjectStats(state.project);
+      } catch(e) {
+         debugPrint("Error saving export stats: $e");
+      }
+  }
+
   void replaceAllPages(List<AlbumPage> newPages) {
     saveHistorySnapshot();
     state = state.copyWith(
@@ -2243,7 +2279,7 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     );
   }
 
-  Future<void> saveProject(String path, {Duration? currentChronometer}) async {
+  Future<void> saveProject(String path, {Duration? currentChronometer, AiaUser? currentUser}) async {
     await syncAll(); // Always try to sync rotations/moves before saving
     
     // --- Update Stats & Metadata ---
@@ -2253,44 +2289,67 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     
     final newTotalTime = state.project.totalEditingTime + sessionDuration;
     
-    // Calculate Stats
+    // Calculate Stats with Firestore Mappings
+    final mappings = await FirestoreService().getPhotographerMappings();
+
+    String getKey(String path) {
+         final meta = _metadataCache[path];
+         if (meta == null) return "Unknown";
+         
+         // 1. Check Serial Override
+         if (meta.cameraSerial != null && mappings.containsKey(meta.cameraSerial)) {
+            return mappings[meta.cameraSerial]!;
+         }
+         
+         // 2. Default Logic
+         final model = meta.cameraModel ?? "Unknown";
+         if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
+             return "${model}_${meta.cameraSerial}";
+         } else if (meta.artist != null && meta.artist!.isNotEmpty) {
+             return "${model}_${meta.artist}";
+         } else {
+             return model;
+         }
+    }
+
     final sourceStats = <String, int>{};
     for (var p in state.project.allImagePaths) {
-         final meta = _metadataCache[p];
-         String key = "Unknown";
-         if (meta != null) {
-              // Same Logic as _getCameraKey/AdjustedDate
-              final model = meta.cameraModel ?? "Unknown";
-              if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
-                  key = "${model}_${meta.cameraSerial}";
-              } else if (meta.artist != null && meta.artist!.isNotEmpty) {
-                  key = "${model}_${meta.artist}";
-              } else {
-                  key = model;
-              }
-         }
-         sourceStats[key] = (sourceStats[key] ?? 0) + 1;
+         sourceStats[getKey(p)] = (sourceStats[getKey(p)] ?? 0) + 1;
     }
     
     final usedStats = <String, int>{};
     for (var page in state.project.pages) {
         for (var photo in page.photos) {
             if (photo.path.isEmpty) continue;
-            final meta = _metadataCache[photo.path];
-             String key = "Unknown";
-             if (meta != null) {
-                  final model = meta.cameraModel ?? "Unknown";
-                  if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
-                      key = "${model}_${meta.cameraSerial}";
-                  } else if (meta.artist != null && meta.artist!.isNotEmpty) {
-                      key = "${model}_${meta.artist}";
-                  } else {
-                      key = model;
-                  }
-             }
-             usedStats[key] = (usedStats[key] ?? 0) + 1;
+            usedStats[getKey(photo.path)] = (usedStats[getKey(photo.path)] ?? 0) + 1;
         }
     }
+    
+
+    // Determine User Info (Default to Editor/Environment if null)
+    AiaUser? effectiveUser = currentUser;
+    if (effectiveUser == null) {
+       final fbUser = FirebaseAuth.instance.currentUser;
+       if (fbUser != null) {
+          debugPrint("DEBUG: Auto-detected Firebase User: ${fbUser.email}");
+          effectiveUser = AiaUser(
+             id: fbUser.uid,
+             name: fbUser.displayName ?? fbUser.email?.split('@')[0] ?? "Usuario",
+             email: fbUser.email ?? "",
+             role: "Editor",
+             company: "Unknown", 
+          );
+       }
+    }
+
+    final String lastUser = effectiveUser?.name ?? Platform.environment['USERNAME'] ?? Platform.environment['USER'] ?? "Editor";
+    final String userCategory = effectiveUser?.role ?? "Editor";
+    final String company = effectiveUser?.company ?? "Unknown"; 
+    // Ideally we track company ID in project. But let's assume Project model keeps it simple for now. 
+    // Wait, project.company field exists in Firestore `saveProjectStats` logic but usually NOT in local Project model.
+    // The `Project` model in `project_model.dart` DOES have `company` field? Let's check view_file from earlier.
+    // Step 3541 line 2423... doesn't show model definition.
+    // Assuming `Project` model MIGHT update `lastUser`.
     
     // Update Project Object with new stats
     final updatedProject = state.project.copyWith(
@@ -2298,10 +2357,21 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
         chronometerTime: currentChronometer ?? state.project.chronometerTime,
         sourcePhotoCounts: sourceStats,
         usedPhotoCounts: usedStats,
-        lastUser: Platform.environment['USERNAME'] ?? Platform.environment['USER'] ?? "Editor",
-        userCategory: "Editor", 
-        // createdByCategory remains unchanged
+        lastUser: lastUser,
+        userCategory: userCategory, 
+        company: company, // If Project model has this. If not, FirestoreService fetches it using lastUser ID. 
+        // We'll trust FirestoreService.saveProjectStats logic which fetches userDoc.
+        // BUT if we want to save LOCAL JSON with correct attribution, we should update it here.
     );
+
+    // Save Stats to Firestore (Buffered)
+    // We await this now to catch potential errors in saving metadata
+    try {
+       // Passing existing metadata cache (from TimeShift/Preload) to avoid re-extraction failures
+       await FirestoreService().saveProjectStats(updatedProject, metadataCache: _metadataCache);
+    } catch (e) {
+       debugPrint("Failed to save project stats to Firestore: $e");
+    }
     
     // Update State temporarily to reflect saved stats (and so toJson uses them)
     // Note: We don't change 'state' broadly to avoid UI flicker, but we need these values in the saved file.

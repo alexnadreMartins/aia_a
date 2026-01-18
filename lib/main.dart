@@ -3,7 +3,9 @@ import 'dart:ui';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:firedart/firedart.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:aia_album/firebase_options.dart';
+import 'logic/firestore_service.dart';
 import 'ui/root_widget.dart' as app_root;
 
 void main(List<String> args) async {
@@ -11,15 +13,15 @@ void main(List<String> args) async {
 
   await windowManager.ensureInitialized();
   
-  // Initialize Firedart (Firebase for Linux)
+  // Initialize Firebase (Windows & Web supported via firebase_core)
   try {
-     FirebaseAuth.initialize(
-       "AIzaSyBXux5MBn3DBA0cu6u_BmnzsCDq5aLIklQ",
-       VolatileStore(),
+     await Firebase.initializeApp(
+       options: DefaultFirebaseOptions.currentPlatform,
      );
-     Firestore.initialize("aiaalbum");
+     // Initialize Firestore Service
+     await FirestoreService().ensureInitialized();
   } catch (e) {
-     // Ignore if already initialized or error on Windows if purely local
+     debugPrint("Firebase Init Error: $e");
   }
 
   WindowOptions windowOptions = const WindowOptions(

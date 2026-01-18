@@ -11,6 +11,7 @@ import 'widgets/flip_book_viewer.dart';
 import '../logic/auto_diagramming_service.dart';
 import 'widgets/diagram_progress_overlay.dart';
 import '../logic/standard_template_initializer.dart';
+import 'package:aia_album/ui/dashboard/dashboard_page.dart';
 import '../logic/rapid_diagramming_service.dart';
 import 'dialogs/rapid_diagramming_dialog.dart';
 import 'package:aia_album/ui/dialogs/time_shift_dialog.dart';
@@ -27,6 +28,8 @@ import 'package:pdf/pdf.dart';
 import 'package:uuid/uuid.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:file_picker/file_picker.dart';
+import '../models/user_model.dart';
+import '../logic/auth_repository.dart';
 import '../models/project_model.dart';
 import '../models/asset_model.dart';
 import '../state/project_state.dart';
@@ -35,6 +38,7 @@ import '../logic/layout_engine.dart';
 import '../logic/template_system.dart';
 import '../logic/export_helper.dart';
 import '../logic/image_loader.dart';
+import '../logic/firestore_service.dart';
 import 'editor/image_editor_view.dart';
 import '../../logic/cache_provider.dart';
 import 'widgets/photo_manipulator.dart';
@@ -153,7 +157,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
                       // Save
                       final path = ref.read(projectProvider).currentProjectPath;
                       if (path != null) {
-                         await ref.read(projectProvider.notifier).saveProject(path, currentChronometer: _currentChronometerTotal);
+                         await ref.read(projectProvider.notifier).saveProject(path, currentChronometer: _currentChronometerTotal, currentUser: ref.read(userProfileProvider).value);
                          if (mounted) Navigator.of(context).pop(true);
                       } else {
                          // Save As...
@@ -166,7 +170,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
                               allowedExtensions: ['alem', 'json'],
                          );
                          if (result != null) {
-                            await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: _currentChronometerTotal);
+                            await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: _currentChronometerTotal, currentUser: ref.read(userProfileProvider).value);
                             if (mounted) Navigator.of(context).pop(true);
                          } else {
                             if (mounted) Navigator.of(context).pop(false);
@@ -451,7 +455,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
 
     return CallbackShortcuts(
       bindings: {
-         const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => _handleSave(context, ref, currentChronometer: _currentChronometerTotal),
+         const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => _handleSave(context, ref, currentChronometer: _currentChronometerTotal, currentUser: ref.read(userProfileProvider).value),
          const SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true): () => _handleSaveAs(context, ref),
          const SingleActivator(LogicalKeyboardKey.keyN, control: true): () => _showNewProjectDialog(context, ref),
          const SingleActivator(LogicalKeyboardKey.keyN, control: true, shift: true): _handleNewInstance,
@@ -1006,6 +1010,19 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
                   // Only update text, don't flood progress bar to avoid jitter
                   currentStatus.value = "Empacotando [$studentName]: $cur/$tot";
               });
+              
+              // --- UPDATE STATS ---
+              try {
+                 final currentUser = ref.read(userProfileProvider).value;
+                 final projectForStats = newProject.copyWith(
+                    lastUser: currentUser?.name ?? newProject.lastUser,
+                    userCategory: currentUser?.role ?? "Master",
+                    company: currentUser?.company ?? "Unknown",
+                 );
+                 await FirestoreService().saveProjectStats(projectForStats);
+              } catch (e) {
+                 debugPrint("Error saving batch stats for $studentName: $e");
+              }
                 
               successCount++;
                
@@ -1387,6 +1404,15 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
             ],
           ),
           const SizedBox(width: 8),
+          IconButton(
+             icon: const Icon(Icons.settings, color: Colors.white70),
+             tooltip: "Configurações e Dashboard",
+             onPressed: () {
+                Navigator.of(context).push(
+                   MaterialPageRoute(builder: (context) => const DashboardPage())
+                );
+             },
+          ),
           IconButton(
              icon: const Icon(Icons.menu_book, color: Colors.white70),
              tooltip: "Visualização Flip Book (ESC para sair)",
@@ -3057,21 +3083,58 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
 
   // --- Handlers ---
 
-  Future<void> _handleSave(BuildContext context, WidgetRef ref, {Duration? currentChronometer}) async {
+  AiaUser? _resolveCurrentUser(WidgetRef ref) {
+      final profile = ref.read(userProfileProvider).value;
+      if (profile != null) return profile;
+      
+      final firebaseUser = ref.read(authProvider);
+      if (firebaseUser != null) {
+          // Fallback: Create detailed user from Firebase Auth
+          return AiaUser(
+             id: firebaseUser.uid,
+             name: firebaseUser.displayName ?? firebaseUser.email?.split('@')[0] ?? "Usuario",
+             email: firebaseUser.email ?? "",
+             role: "Editor", // safe default
+             company: "Unknown",
+          );
+      }
+      return null;
+  }
+
+  Future<void> _handleSave(BuildContext context, WidgetRef ref, {Duration? currentChronometer, AiaUser? currentUser}) async {
     final state = ref.read(projectProvider);
+    
+    // Resolve User: Argument -> Profile -> Firebase -> Null
+    final finalUser = currentUser ?? _resolveCurrentUser(ref);
+    
+    // Prompt for Contract if missing
+    if (state.project.contractNumber.isEmpty) {
+       await _promptAndSetContractNumber(context, ref);
+       // We proceed even if they cancel (saving as draft/empty contract is allowed, but we tried)
+    }
+
     if (state.currentProjectPath != null && state.currentProjectPath!.isNotEmpty) {
       // Overwrite existing file
-      await ref.read(projectProvider.notifier).saveProject(state.currentProjectPath!, currentChronometer: currentChronometer);
+      await ref.read(projectProvider.notifier).saveProject(state.currentProjectPath!, currentChronometer: currentChronometer, currentUser: finalUser);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto salvo!")));
       }
     } else {
       // If no file path, behave like Save As
-      await _handleSaveAs(context, ref, currentChronometer: currentChronometer);
+      await _handleSaveAs(context, ref, currentChronometer: currentChronometer, currentUser: finalUser);
     }
   }
 
-  Future<void> _handleSaveAs(BuildContext context, WidgetRef ref, {Duration? currentChronometer}) async {
+  Future<void> _handleSaveAs(BuildContext context, WidgetRef ref, {Duration? currentChronometer, AiaUser? currentUser}) async {
+    // Resolve User: Argument -> Profile -> Firebase -> Null
+    final finalUser = currentUser ?? _resolveCurrentUser(ref);
+
+    // Prompt for Contract if missing
+    final state = ref.read(projectProvider);
+    if (state.project.contractNumber.isEmpty) {
+       await _promptAndSetContractNumber(context, ref);
+    }
+
     final result = await FilePicker.platform.saveFile(
       dialogTitle: "Salvar Como",
       fileName: "album_smart_preview.alem",
@@ -3079,7 +3142,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
       type: FileType.custom,
     );
     if (result != null) {
-      await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: currentChronometer);
+      await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: currentChronometer, currentUser: finalUser);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto salvo com sucesso!")));
       }
@@ -3194,6 +3257,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
       // Now use ExportHelper to build PDF from captured bytes
       await _buildPdfFromBytes(capturedBytes, state.project, result);
       
+      // Update Stats
+      await ref.read(projectProvider.notifier).incrementExportStats(state.project.pages.length);
+
       if (mounted) {
         Navigator.pop(context); // Close dialog
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("PDF Exportado com sucesso!")));
@@ -3310,7 +3376,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
         
         ref.read(projectProvider.notifier).setPageIndex(originalIndex);
        
-       if (mounted) {
+        // Update Stats
+        await ref.read(projectProvider.notifier).incrementExportStats(state.project.pages.length);
+
+        if (mounted) {
          Navigator.pop(context);
          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Imagens exportadas!")));
        }

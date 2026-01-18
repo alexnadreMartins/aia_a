@@ -23,40 +23,36 @@ class PhotoMetadata {
 }
 
 class MetadataHelper {
-  // ... (getMetadataBatch, _extractMetadataBatchInBackground same)
   static Future<List<PhotoMetadata>> getMetadataBatch(List<String> paths) async {
-    final List<_MetadataInput> inputs = [];
-    for (var path in paths) {
-      final file = File(path);
-      if (await file.exists()) {
-        Uint8List bytes;
-        try {
-           final randomAccessFile = await file.open();
-           bytes = await randomAccessFile.read(128 * 1024); 
-           await randomAccessFile.close();
-        } catch (e) {
-           bytes = Uint8List(0);
-        }
-        
-        final stats = await file.stat();
-        inputs.add(_MetadataInput(path, bytes, stats.modified));
-      }
-    }
-    
-    return compute(_extractMetadataBatchInBackground, inputs);
-  }
-
-  static Future<List<PhotoMetadata>> _extractMetadataBatchInBackground(List<_MetadataInput> inputs) async {
     final List<PhotoMetadata> results = [];
-    for (var input in inputs) {
-      results.add(await _extractSingleMetadata(input));
+    for (var path in paths) {
+      results.add(await _extractMetadataForPath(path));
     }
     return results;
   }
 
-  static Future<PhotoMetadata> _extractSingleMetadata(_MetadataInput input) async {
-    final data = await readExifFromBytes(input.bytes);
+  static Future<PhotoMetadata> _extractMetadataForPath(String path) async {
+      final file = File(path);
+      if (!file.existsSync()) return PhotoMetadata();
 
+      Uint8List bytes;
+      try {
+           final raf = await file.open();
+           // Increased to 512KB to ensure Camera Model is captured (TimeShift needs this)
+           bytes = await raf.read(512 * 1024); 
+           await raf.close();
+      } catch (e) {
+           bytes = Uint8List(0);
+      }
+      
+      return _extractSingleMetadata(bytes, await file.lastModified());
+  }
+
+  static Future<PhotoMetadata> _extractSingleMetadata(Uint8List bytes, DateTime fallbackDate) async {
+    Map<String, IfdTag> data = await readExifFromBytes(bytes);
+
+    // Deep Scan removed to prevent blocking. 2MB buffer should suffice.
+    
     DateTime? date;
     String? camera;
     String? serial;
@@ -76,7 +72,7 @@ class MetadataHelper {
     }
     
     // Fallback to provided file date
-    date ??= input.fallbackDate;
+    date ??= fallbackDate;
 
     // 2. Extract Camera
     if (data.containsKey('Image Model')) {
@@ -99,6 +95,10 @@ class MetadataHelper {
       serial = data['Exif Photo BodySerialNumber']?.toString();
     } else if (data.containsKey('Image CameraSerialNumber')) {
       serial = data['Image CameraSerialNumber']?.toString();
+    } else if (data.containsKey('MakerNote SerialNumber')) {
+      serial = data['MakerNote SerialNumber']?.toString();
+    } else if (data.containsKey('Exif.MakerNote.SerialNumber')) {
+      serial = data['Exif.MakerNote.SerialNumber']?.toString();
     }
 
     // 2.2 Extract Artist
@@ -130,7 +130,7 @@ class MetadataHelper {
     // 4. Fallback: Heavy decoding only if needed
     if (!portrait && orientation == 1) {
        try {
-         final info = img_tools.decodeImage(input.bytes);
+         final info = img_tools.decodeImage(bytes);
          if (info != null && info.height > info.width) {
             portrait = true;
          }
@@ -157,9 +157,3 @@ class MetadataHelper {
   }
 }
 
-class _MetadataInput {
-  final String path;
-  final Uint8List bytes;
-  final DateTime fallbackDate;
-  _MetadataInput(this.path, this.bytes, this.fallbackDate);
-}

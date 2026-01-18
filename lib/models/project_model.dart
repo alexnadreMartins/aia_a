@@ -211,11 +211,13 @@ class Project {
   // New Stats Fields
   final Map<String, int> sourcePhotoCounts; // e.g. "Canon 5D_123": 100
   final Map<String, int> usedPhotoCounts; // e.g. "Canon 5D_123": 50
+  final int exportedCount; // NEW
   final Duration totalEditingTime;
   final Duration chronometerTime;
   final String lastUser;
   final String userCategory; // "Editor" or "Master"
   final String createdByCategory; // "Master" (if created via Batch), etc.
+  final String company; // Company Name or ID
 
   Project({
     String? id,
@@ -230,11 +232,13 @@ class Project {
     this.defaultBackgroundPath,
     this.sourcePhotoCounts = const {},
     this.usedPhotoCounts = const {},
+    this.exportedCount = 0, // NEW
     this.totalEditingTime = Duration.zero,
     this.chronometerTime = Duration.zero,
     this.lastUser = "Unknown",
     this.userCategory = "Editor",
     this.createdByCategory = "Editor",
+    this.company = "Default",
   })  : id = id ?? Uuid().v4(),
         pages = pages ?? [],
         allImagePaths = allImagePaths ?? [],
@@ -254,11 +258,13 @@ class Project {
     String? defaultBackgroundPath,
     Map<String, int>? sourcePhotoCounts,
     Map<String, int>? usedPhotoCounts,
+    int? exportedCount, // NEW
     Duration? totalEditingTime,
     Duration? chronometerTime,
     String? lastUser,
     String? userCategory,
     String? createdByCategory,
+    String? company,
   }) {
     return Project(
       id: id ?? this.id,
@@ -273,11 +279,13 @@ class Project {
       defaultBackgroundPath: defaultBackgroundPath ?? this.defaultBackgroundPath,
       sourcePhotoCounts: sourcePhotoCounts ?? this.sourcePhotoCounts,
       usedPhotoCounts: usedPhotoCounts ?? this.usedPhotoCounts,
+      exportedCount: exportedCount ?? this.exportedCount, // NEW
       totalEditingTime: totalEditingTime ?? this.totalEditingTime,
       chronometerTime: chronometerTime ?? this.chronometerTime,
       lastUser: lastUser ?? this.lastUser,
       userCategory: userCategory ?? this.userCategory,
       createdByCategory: createdByCategory ?? this.createdByCategory,
+      company: company ?? this.company,
     );
   }
 
@@ -295,11 +303,13 @@ class Project {
       'defaultBackgroundPath': defaultBackgroundPath,
       'sourcePhotoCounts': sourcePhotoCounts,
       'usedPhotoCounts': usedPhotoCounts,
+      'exportedCount': exportedCount, // NEW
       'totalEditingTime': totalEditingTime.inSeconds,
       'chronometerTime': chronometerTime.inSeconds,
       'lastUser': lastUser,
       'userCategory': userCategory,
       'createdByCategory': createdByCategory,
+      'company': company,
     };
   }
 
@@ -319,11 +329,13 @@ class Project {
       defaultBackgroundPath: json['defaultBackgroundPath'],
       sourcePhotoCounts: Map<String, int>.from(json['sourcePhotoCounts'] ?? {}),
       usedPhotoCounts: Map<String, int>.from(json['usedPhotoCounts'] ?? {}),
+      exportedCount: json['exportedCount'] as int? ?? 0, // NEW
       totalEditingTime: Duration(seconds: json['totalEditingTime'] as int? ?? 0),
       chronometerTime: Duration(seconds: json['chronometerTime'] as int? ?? 0),
       lastUser: json['lastUser'] ?? "Unknown",
       userCategory: json['userCategory'] ?? "Editor",
       createdByCategory: json['createdByCategory'] ?? "Editor",
+      company: json['company'] ?? "Default",
     );
   }
 }

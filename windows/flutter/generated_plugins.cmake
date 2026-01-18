@@ -3,8 +3,11 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  cloud_firestore
   desktop_drop
   face_detection_tflite
+  firebase_auth
+  firebase_core
   screen_retriever
   window_manager
 )

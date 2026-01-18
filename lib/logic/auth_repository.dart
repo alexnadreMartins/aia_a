@@ -1,34 +1,23 @@
-import 'package:firedart/firedart.dart';
-import 'package:firedart/auth/user_gateway.dart'; // Explicit import for User
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'firestore_service.dart';
+import '../models/user_model.dart';
 
 class AuthNotifier extends StateNotifier<User?> {
   final FirebaseAuth _auth;
 
-  AuthNotifier(this._auth) : super(null) {
-    _init();
-  }
-
-  Future<void> _init() async {
-    if (_auth.isSignedIn) {
-      try {
-        state = await _auth.getUser();
-      } catch (e) {
-        // Token might be invalid
-        _auth.signOut();
-        state = null;
-      }
-    }
+  AuthNotifier(this._auth) : super(_auth.currentUser) {
+    _auth.authStateChanges().listen((user) {
+      state = user;
+    });
   }
 
   Future<void> signIn(String email, String password) async {
-    await _auth.signIn(email, password);
-    state = await _auth.getUser();
+    await _auth.signInWithEmailAndPassword(email: email, password: password);
   }
 
   void signOut() {
     _auth.signOut();
-    state = null;
   }
 }
 
@@ -38,4 +27,13 @@ final firebaseAuthProvider = Provider<FirebaseAuth>((ref) {
 
 final authProvider = StateNotifierProvider<AuthNotifier, User?>((ref) {
   return AuthNotifier(ref.watch(firebaseAuthProvider));
+});
+
+// Provides AiaUser profile for the logged-in user
+final userProfileProvider = FutureProvider<AiaUser?>((ref) async {
+  final user = ref.watch(authProvider);
+  if (user == null) return null;
+  
+  // Import FirestoreService
+  return await FirestoreService().getUser(user.uid);
 });
