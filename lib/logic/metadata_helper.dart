@@ -8,6 +8,7 @@ class PhotoMetadata {
   final DateTime? dateTaken;
   final String? cameraModel;
   final String? cameraSerial;
+  final String? artist;
   final int orientation; 
   final bool isPortrait;
 
@@ -15,33 +16,30 @@ class PhotoMetadata {
     this.dateTaken,
     this.cameraModel,
     this.cameraSerial,
+    this.artist,
     this.orientation = 1,
     this.isPortrait = false,
   });
 }
 
 class MetadataHelper {
+  // ... (getMetadataBatch, _extractMetadataBatchInBackground same)
   static Future<List<PhotoMetadata>> getMetadataBatch(List<String> paths) async {
     final List<_MetadataInput> inputs = [];
     for (var path in paths) {
       final file = File(path);
       if (await file.exists()) {
-      if (await file.exists()) {
         Uint8List bytes;
         try {
-           // Read only first 128KB to avoid loading full image into memory
-           // Most EXIF data is in the header.
            final randomAccessFile = await file.open();
            bytes = await randomAccessFile.read(128 * 1024); 
            await randomAccessFile.close();
         } catch (e) {
-           // Fallback or just empty
            bytes = Uint8List(0);
         }
         
         final stats = await file.stat();
         inputs.add(_MetadataInput(path, bytes, stats.modified));
-      }
       }
     }
     
@@ -62,6 +60,7 @@ class MetadataHelper {
     DateTime? date;
     String? camera;
     String? serial;
+    String? artist;
     int orientation = 1;
 
     // 1. Extract Date
@@ -88,7 +87,6 @@ class MetadataHelper {
     
     // Fallback if Camera is Unknown: Use Folder Name or "Unknown Camera"
     if (camera == null || camera.isEmpty) {
-        // Try to guess from Manufacturer
         if (data.containsKey('Image Make')) {
            camera = data['Image Make']?.toString();
         }
@@ -101,6 +99,15 @@ class MetadataHelper {
       serial = data['Exif Photo BodySerialNumber']?.toString();
     } else if (data.containsKey('Image CameraSerialNumber')) {
       serial = data['Image CameraSerialNumber']?.toString();
+    }
+
+    // 2.2 Extract Artist
+    if (data.containsKey('Image Artist')) {
+      artist = data['Image Artist']?.toString();
+    } else if (data.containsKey('Exif.Image.Artist')) {
+      artist = data['Exif.Image.Artist']?.toString();
+    } else if (data.containsKey('Image OwnerName')) {
+      artist = data['Image OwnerName']?.toString();
     }
 
     // 3. Extract Orientation
@@ -134,6 +141,7 @@ class MetadataHelper {
       dateTaken: date,
       cameraModel: camera,
       cameraSerial: serial,
+      artist: artist,
       orientation: orientation,
       isPortrait: portrait,
     );

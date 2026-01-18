@@ -40,8 +40,17 @@ class ReferenceEngine {
            final bps = _extractBlueprints(project);
            
            // If we have valid blueprints, let's also try to learn Time Offsets
-           // from this "Winner" project.
+           // Priority 1: Read Explicit Offsets from Project (Manual TimeShift)
            Map<String, Duration> offsets = {};
+           if (project.cameraTimeOffsets.isNotEmpty) {
+               project.cameraTimeOffsets.forEach((key, sec) {
+                   offsets[key] = Duration(seconds: sec);
+               });
+               print("RD: Loaded explicit offsets from reference: $offsets");
+               return ReferenceData(blueprints: bps, cameraOffsets: offsets);
+           }
+           
+           // Priority 2: Reverse Engineer from Layout (Legacy/Auto)
            if (bps.isNotEmpty) {
               offsets = await _learnTimeOffsets(project);
               print("RD: Learned offsets: $offsets");

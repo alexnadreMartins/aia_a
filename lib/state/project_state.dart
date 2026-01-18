@@ -50,6 +50,8 @@ class PhotoBookState {
   final BrowserSortType browserSortType;
   final BrowserFilterType browserFilterType;
   final String? proxyRoot; // Path to unzipped proxies (if loaded from package)
+  final bool isDirty; // Tracks unsaved changes
+  final int metadataVersion; // Forces rebuild when metadata loads
 
   PhotoBookState({
     required this.project,
@@ -69,6 +71,8 @@ class PhotoBookState {
     this.browserSortType = BrowserSortType.name,
     this.browserFilterType = BrowserFilterType.all,
     this.proxyRoot,
+    this.isDirty = false,
+    this.metadataVersion = 0,
   });
 
   PhotoBookState copyWith({
@@ -89,6 +93,8 @@ class PhotoBookState {
     bool? isPrecisionMode,
     BrowserFilterType? browserFilterType,
     String? proxyRoot,
+    bool? isDirty,
+    int? metadataVersion,
   }) {
     return PhotoBookState(
       project: project ?? this.project,
@@ -108,6 +114,8 @@ class PhotoBookState {
       browserSortType: browserSortType ?? this.browserSortType,
       browserFilterType: browserFilterType ?? this.browserFilterType,
       proxyRoot: proxyRoot ?? this.proxyRoot,
+      isDirty: isDirty ?? this.isDirty,
+      metadataVersion: metadataVersion ?? this.metadataVersion,
     );
   }
 
@@ -127,6 +135,7 @@ class PhotoBookState {
 // --- Notifier with Undo/Redo Logic ---
 class ProjectNotifier extends StateNotifier<PhotoBookState> {
   final Ref ref; // Inject Ref
+  DateTime _sessionStartTime = DateTime.now();
   // ...
   
   void setEditingContent(bool isEditing) {
@@ -159,6 +168,9 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
   final List<Project> _undoStack = [];
   final List<Project> _redoStack = [];
   static const int _maxHistory = 50;
+  
+  // Cache for file dates to optimize sorting
+  final Map<String, DateTime> _fileDateCache = {};
 
   ProjectNotifier(this.ref)
       : super(PhotoBookState(
@@ -173,12 +185,14 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
       _saveStateToHistory();
       _undoStack.clear(); 
       _redoStack.clear();
+      _sessionStartTime = DateTime.now();
       
       state = state.copyWith(
           project: newProject,
           multiSelectedPages: {},
           selectedPhotoId: null,
-          selectedBrowserPaths: {}
+          selectedBrowserPaths: {},
+          isDirty: false,
       );
       _updateUndoRedoFlags();
   }
@@ -190,6 +204,9 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     _undoStack.add(state.project);
     _redoStack.clear();
     _updateUndoRedoFlags();
+    
+    // Mark as dirty since we are about to modify
+    state = state.copyWith(isDirty: true);
   }
 
   void _updateUndoRedoFlags() {
@@ -394,21 +411,34 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
 
   void updateCameraTimeOffsets(Map<String, int> offsets) {
      _saveStateToHistory();
-     state = state.copyWith(
-       project: state.project.copyWith(cameraTimeOffsets: offsets)
-     );
+      state = state.copyWith(
+        project: state.project.copyWith(cameraTimeOffsets: offsets),
+        metadataVersion: state.metadataVersion + 1,
+      );
   }
 
   void selectPhoto(String? photoId) {
     if (state.selectedPhotoId == photoId) {
-      // Force update if we are deselecting (photoId == null) to ensure UI redraws happen,
-      // especially for export where we need to clear handles.
       if (photoId == null) {
-         state = state.copyWith(selectedPhotoId: null);
+         state = state.copyWith(selectedPhotoId: null, selectedBrowserPaths: {});
       }
       return;
     }
-    state = state.copyWith(selectedPhotoId: photoId);
+
+    String? path;
+    if (photoId != null) {
+       for (var page in state.project.pages) {
+          try {
+             path = page.photos.firstWhere((p) => p.id == photoId).path;
+             break;
+          } catch (_) {}
+       }
+    }
+
+    state = state.copyWith(
+       selectedPhotoId: photoId, 
+       selectedBrowserPaths: path != null ? {path} : {}
+    );
   }
 
   void setCanvasScale(double scale) {
@@ -438,56 +468,8 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     );
 
     // 2. Background Process (Sync Later)
-    // We do NOT await this to block UI. 
-    // Ideally we might want a queue, but simply unawaited async serves the "offline" requirement 
-    // as it won't freeze the app if disk is slow/unavailable.
     Future.microtask(() async {
         for (var path in paths) {
-           await _rotateFile(path, degrees);
-           // After successful write, we MIGHT reset the visual rotation if we wanted to reload the file.
-           // BUT: The user experience is smoother if we just keep the rotation value 
-           // until the next reload. 
-           // However, `_rotateFile` overwrites the bits. 
-           // If we overwrite bits, we should eventually reset the `imageRotations` to 0 
-           // so we don't double-rotate on reload.
-           // CHALLENGE: If we reset to 0 later, the user sees a jump.
-           // BETTER: Update the `imageRotations` to 0 ONLY when we confirm the file is reloaded/cached.
-           // For now, let's Stick to: Update Map, Write File. 
-           // Issue: If we write file, next time we load it, it's rotated. 
-           // If we also store "90" in map, we see 90+90 = 180.
-           // FIX: We need to reset the map to 0 AFTER the file is safely written and we trigger a reload.
-           // OR: We just don't write to the file until export? No, user wants it saved.
-           
-           // Correct Approach for "Offline":
-           // 1. UI sets rotation to +90. User sees +90.
-           // 2. Background tries to write file. 
-           // 3. If success: Write file, THEN update state to set rotation back to 0 (and reload image).
-           // This causes a "flicker".
-           // ALTERNATIVE: Don't modify the file bits! Just store metadata!
-           // User specifically said "rotacionar no modo offline para syncronizar depois".
-           // This implies they want the ACTION to be queued.
-           // Modifying bits is destructive and slow. 
-           // IF the legacy app modified bits, we should stick to it OR changing to Metadata-only is better?
-           // `_rotateFile` does `img.copyRotate`, which IS modifying bits.
-           
-           // PROPOSED FIX:
-           // Keep the Optimistic Rotation in `imageRotations` (Metadata).
-           // TRY to write the file in background.
-           // IF successful, THEN reset metadata to 0.
-           // IF fails (offline), keep metadata. 
-           // Next time app opens, it sees metadata +90.
-           // Checks file. If file is original, applies +90 on view.
-           // We need a "Sync" process that runs on startup/connection to apply pending rotations?
-           
-           // Implementation for NOW (Quick Fix):
-           // Just keep the metadata rotation!
-           // Don't modify the file immediately if it blocks? 
-           // Actually, `_rotateFile` is what they want "synced later".
-           // So:
-           // 1. Update State (Rotation += 90).
-           // 2. Background: Rotate File. 
-           // 3. If Success -> Update State (Rotation -= 90, i.e. back to 0), Invalidate Cache.
-           
            await _safeRotateInBackground(path, degrees);
         }
     });
@@ -578,17 +560,9 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
               } catch (_) {}
            }
 
-           // 3. Calculate Bake Angle
-           // Convert EXIF to degrees
-           int exifDegrees = 0;
-           if (orient == 6) exifDegrees = 90;
-           else if (orient == 3) exifDegrees = 180;
-           else if (orient == 8) exifDegrees = 270;
-
-           final int totalTargetDegrees = (exifDegrees + deltaDegrees) % 360;
-
-           // 4. Perform Rotation
-           await _rotateFile(path, totalTargetDegrees);
+           // 3. Perform Rotation
+           // decodeImage already bakes EXIF, so we just rotate by the delta.
+           await _rotateFile(path, deltaDegrees);
            
            // 5. Restore Original Date
            try {
@@ -698,6 +672,87 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
 
  
   // --- Browser Logic ---
+  
+  // Cache for metadata to optimize sorting
+  final Map<String, PhotoMetadata> _metadataCache = {};
+
+  /// Helper: Get Adjusted Date considering TimeShift
+  DateTime _getAdjustedDate(String path) {
+      if (!_metadataCache.containsKey(path)) {
+         // Fallback to File Mod Time if metadata not loaded
+         return _fileDateCache[path] ?? DateTime(1970);
+      }
+      
+      final meta = _metadataCache[path]!;
+      DateTime date = meta.dateTaken ?? _fileDateCache[path] ?? DateTime(1970);
+      
+      // Get Camera Key
+      String camKey = meta.cameraModel ?? "Unknown";
+      if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
+          camKey = "${meta.cameraModel ?? 'Unknown'}_${meta.cameraSerial}";
+      } else if (meta.artist != null && meta.artist!.isNotEmpty) {
+          camKey = "${meta.cameraModel ?? 'Unknown'}_${meta.artist}";
+      }
+      
+      // Try specific key first, then generic Model key
+      int offset = state.project.cameraTimeOffsets[camKey] ?? 0;
+      if (offset == 0 && camKey.contains('_')) {
+          // Fallback to just Model name (e.g. "Canon 5D") if specific "Canon 5D_123" not found
+          final simpleKey = meta.cameraModel ?? "Unknown";
+          offset = state.project.cameraTimeOffsets[simpleKey] ?? 0;
+      }
+      if (offset != 0) {
+         return date.add(Duration(seconds: offset));
+      }
+      return date;
+  }
+
+  /// Returns project photos sorted by ADJUSTED DATE (TimeShift) to match TimeShift sync.
+  List<String> getProjectPhotosSortedByDate() {
+     final allPaths = List<String>.from(state.project.allImagePaths);
+     
+     // 1. Ensure Caches Potentially Populated (Lazy / Best Effort)
+     if (_fileDateCache.isEmpty && allPaths.isNotEmpty) {
+        for (var p in allPaths) {
+           if (!_fileDateCache.containsKey(p)) {
+              try {
+                 _fileDateCache[p] = File(p).lastModifiedSync();
+              } catch (_) {
+                 _fileDateCache[p] = DateTime(1970);
+              }
+           }
+        }
+     }
+     
+     // Note: If _metadataCache is empty, we fall back to file time.
+     // To ensure accuracy, we should trigger metadata load if needed, 
+     // but we can't await here. Ideally, `TimeShiftDialog` should have populated this cache?
+     // OR we expose a method `await notifier.preloadMetadata()` that UI calls?
+     // For now, sorting relies on whatever is available.
+     
+     allPaths.sort((a, b) {
+        final dateA = _getAdjustedDate(a);
+        final dateB = _getAdjustedDate(b);
+        return dateA.compareTo(dateB); // Oldest first
+     });
+     
+     return allPaths;
+  }
+
+  /// Called by TimeShiftDialog or on load to hydrate metadata for sorting
+  Future<void> preloadMetadataForSort() async {
+     final pathsToLoad = state.project.allImagePaths.where((p) => !_metadataCache.containsKey(p)).toList();
+     if (pathsToLoad.isEmpty) return;
+     
+     final metas = await MetadataHelper.getMetadataBatch(pathsToLoad);
+     for(int i=0; i<pathsToLoad.length; i++) {
+        _metadataCache[pathsToLoad[i]] = metas[i];
+     }
+     // Force rebuild of consumers listening to project (since sort output changes)
+     // BUT sort is computed in getter, so we need to notify listeners.
+     // We can just set state to itself to trigger rebuild?
+      state = state.copyWith(metadataVersion: state.metadataVersion + 1);
+  }
 
   void setBrowserSortType(BrowserSortType type) {
     if (state.browserSortType == type) return;
@@ -740,21 +795,27 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
         filtered.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
         break;
       case BrowserSortType.date:
-        // Fast sort by File Modification Time (Sync)
-        // Ideally we cache this, but for < 1000 photos might be ok?
-        // Doing I/O in sort comparator is bad.
-        // Let's caching logic:
-        // We will just sort by path (name) as fallback if heavy?
-        // Actually, we can just grab File stats once.
-        final map = <String, DateTime>{};
-        for (var p in filtered) {
-           try {
-             map[p] = File(p).lastModifiedSync();
-           } catch (_) {
-             map[p] = DateTime(1970);
+        // Optimized Sort with Caching
+        if (_fileDateCache.isEmpty && filtered.isNotEmpty) {
+           // Pre-fetch only if cache is empty (bulk load first time)
+           // If we have thousands, this first hit is slow, but subsequent are fast.
+           // Ideally we'd do this async, but for now we mitigate repeated lags.
+           for (var p in state.project.allImagePaths) {
+               try {
+                  if (!_fileDateCache.containsKey(p)) {
+                     _fileDateCache[p] = File(p).lastModifiedSync();
+                  }
+               } catch (_) {
+                  _fileDateCache[p] = DateTime(1970);
+               }
            }
         }
-        filtered.sort((a, b) => map[b]!.compareTo(map[a]!)); // Newest first
+        
+        filtered.sort((a, b) {
+           final dateA = _fileDateCache[a] ?? DateTime(1970);
+           final dateB = _fileDateCache[b] ?? DateTime(1970);
+           return dateA.compareTo(dateB); // Oldest first (Chronological)
+        });
         break;
       case BrowserSortType.selected:
         // Selected first, then name
@@ -2182,27 +2243,85 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     );
   }
 
-  Future<void> saveProject(String path) async {
+  Future<void> saveProject(String path, {Duration? currentChronometer}) async {
     await syncAll(); // Always try to sync rotations/moves before saving
+    
+    // --- Update Stats & Metadata ---
+    final now = DateTime.now();
+    final sessionDuration = now.difference(_sessionStartTime);
+    _sessionStartTime = now; // Reset for next segment
+    
+    final newTotalTime = state.project.totalEditingTime + sessionDuration;
+    
+    // Calculate Stats
+    final sourceStats = <String, int>{};
+    for (var p in state.project.allImagePaths) {
+         final meta = _metadataCache[p];
+         String key = "Unknown";
+         if (meta != null) {
+              // Same Logic as _getCameraKey/AdjustedDate
+              final model = meta.cameraModel ?? "Unknown";
+              if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
+                  key = "${model}_${meta.cameraSerial}";
+              } else if (meta.artist != null && meta.artist!.isNotEmpty) {
+                  key = "${model}_${meta.artist}";
+              } else {
+                  key = model;
+              }
+         }
+         sourceStats[key] = (sourceStats[key] ?? 0) + 1;
+    }
+    
+    final usedStats = <String, int>{};
+    for (var page in state.project.pages) {
+        for (var photo in page.photos) {
+            if (photo.path.isEmpty) continue;
+            final meta = _metadataCache[photo.path];
+             String key = "Unknown";
+             if (meta != null) {
+                  final model = meta.cameraModel ?? "Unknown";
+                  if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
+                      key = "${model}_${meta.cameraSerial}";
+                  } else if (meta.artist != null && meta.artist!.isNotEmpty) {
+                      key = "${model}_${meta.artist}";
+                  } else {
+                      key = model;
+                  }
+             }
+             usedStats[key] = (usedStats[key] ?? 0) + 1;
+        }
+    }
+    
+    // Update Project Object with new stats
+    final updatedProject = state.project.copyWith(
+        totalEditingTime: newTotalTime,
+        chronometerTime: currentChronometer ?? state.project.chronometerTime,
+        sourcePhotoCounts: sourceStats,
+        usedPhotoCounts: usedStats,
+        lastUser: Platform.environment['USERNAME'] ?? Platform.environment['USER'] ?? "Editor",
+        userCategory: "Editor", 
+        // createdByCategory remains unchanged
+    );
+    
+    // Update State temporarily to reflect saved stats (and so toJson uses them)
+    // Note: We don't change 'state' broadly to avoid UI flicker, but we need these values in the saved file.
+    
     try {
       if (path.toLowerCase().endsWith('.alem')) {
           // Check if we are in "Offline/Proxy Mode" or simply have proxies available
           if (state.proxyRoot != null && await Directory(state.proxyRoot!).exists()) {
              debugPrint("Updating Smart Preview Package using existing proxies...");
-             await ProjectPackager.updatePackage(state.project, state.proxyRoot!, path, onProgress: (c, t, s) {
-                // Determine if we need to show progress? For quick saves usually we don't show dialog.
-                // But this operation might take a few seconds.
-                // Since this runs in async without UI feedback (unless we add it), we just log.
+             await ProjectPackager.updatePackage(updatedProject, state.proxyRoot!, path, onProgress: (c, t, s) {
                 if (c % 10 == 0) debugPrint(s);
              });
           } else {
              // Standard Full Pack (Resizing Originals)
              debugPrint("Saving as Smart Preview Package (Full Repack)...");
-             await ProjectPackager.packProject(state.project, path);
+             await ProjectPackager.packProject(updatedProject, path);
           }
       } else {
           // Standard JSON
-          final jsonStr = jsonEncode(state.project.toJson());
+          final jsonStr = jsonEncode(updatedProject.toJson());
           await File(path).writeAsString(jsonStr);
       }
       
@@ -2213,7 +2332,8 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
       
       state = state.copyWith(
           currentProjectPath: path,
-          project: state.project.copyWith(name: nameNoExt)
+          project: updatedProject.copyWith(name: nameNoExt),
+          isDirty: false,
       );
       
       _updateUndoRedoFlags(); // Just to refresh state if needed
@@ -2279,7 +2399,9 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
       project = await _syncPendingRotations(project);
 
       _undoStack.clear();
+      _undoStack.clear();
       _redoStack.clear();
+      _sessionStartTime = DateTime.now();
       
       state = state.copyWith(
         project: project,
@@ -2288,9 +2410,14 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
         selectedBrowserPaths: {},
         currentProjectPath: path,
         proxyRoot: proxyRoot,
+        isDirty: false,
       );
       
       _updateUndoRedoFlags();
+      
+      // Preload Metadata for TimeShift Sorting (Background)
+      preloadMetadataForSort();
+      
       debugPrint("Project loaded from $path (ProxyRoot: $proxyRoot)");
       return true;
     } catch (e) {

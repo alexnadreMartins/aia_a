@@ -418,10 +418,20 @@ class RapidDiagrammingService {
         }
     }
     
+    // Convert Offsets to Seconds (Int)
+    Map<String, int> finalOffsets = {};
+    timeOffsets.forEach((key, duration) {
+       finalOffsets[key] = duration.inSeconds;
+    });
+
     return currentProject.copyWith(
         pages: newPages, 
         name: projectName,
-        contractNumber: contractNumber ?? currentProject.contractNumber
+        contractNumber: contractNumber ?? currentProject.contractNumber,
+        cameraTimeOffsets: finalOffsets,
+        userCategory: "Master",
+        createdByCategory: "Master",
+        lastUser: Platform.environment['USERNAME'] ?? Platform.environment['USER'] ?? "Master User",
     );
   }
   

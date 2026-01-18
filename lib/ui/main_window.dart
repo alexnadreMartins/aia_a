@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:window_manager/window_manager.dart' hide ResizeEdge;
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
@@ -52,7 +53,8 @@ class PhotoBookHome extends ConsumerStatefulWidget {
   ConsumerState<PhotoBookHome> createState() => _PhotoBookHomeState();
 }
 
-class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
+
+class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListener {
   final GlobalKey _pageKey = GlobalKey();
   final GlobalKey _canvasCaptureKey = GlobalKey();
   final ScrollController _thumbScrollController = ScrollController();
@@ -64,10 +66,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   double _rightPanelWidth = 300.0;
   double _bottomPanelHeight = 160.0;
   
-  int _leftDockIndex = 0; // 0 = Fotos, 1 = Assets
+  int _leftDockIndex = 0; 
   String? _lastSelectedBrowserPath;
 
-  // Floating Dock State (ValueNotifiers for Performance)
+  // Floating Dock State
   late ValueNotifier<bool> _isLeftDockFloating;
   late ValueNotifier<Offset> _leftDockPos;
   late ValueNotifier<bool> _showLeftSnap;
@@ -80,12 +82,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   late ValueNotifier<Offset> _bottomDockPos;
   late ValueNotifier<bool> _showBottomSnap;
 
- // 0 = Fotos, 1 = Assets
-
   @override
   void initState() {
     super.initState();
-    // Dock State initialized
+    windowManager.addListener(this);
+    _initWindow();
     
     // Dock State initialized
     _isLeftDockFloating = ValueNotifier(false);
@@ -109,7 +110,101 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
        _initializeStandardTemplates(ref);
        _showNewProjectDialog(context, ref);
+       _updateWindowTitle();
     });
+  }
+  
+  Future<void> _initWindow() async {
+     await windowManager.setPreventClose(true);
+  }
+  
+  void _updateWindowTitle() async {
+     final project = ref.read(projectProvider).project;
+     final dirtyMarker = ref.read(projectProvider).isDirty ? "*" : "";
+     await windowManager.setTitle("AiA Album - ${project.name}$dirtyMarker");
+  }
+
+  @override
+  void onWindowClose() async {
+     final isDirty = ref.read(projectProvider).isDirty;
+     if (isDirty) {
+        // "Confirm Exit and Save?"
+        final shouldClose = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+             title: const Text("Projeto não salvo"),
+             content: const Text("Existem alterações não salvas. Deseja salvar antes de sair?"),
+             actions: [
+                TextButton(
+                   onPressed: () => Navigator.of(context).pop(false), // Cancel
+                   child: const Text("Cancelar"),
+                ),
+                TextButton(
+                  onPressed: () async {
+                      Navigator.of(context).pop(true); // Proceed to close logic
+                      // Trigger Save Logic here? Or return explicit "Save" enum?
+                      // Dialogs are simple. Let's handle save here.
+                      // Wait, we need "Save & Close" and "Close Without Saving" and "Cancel".
+                  }, 
+                  child: const Text("Não Salvar (Sair)"),
+                ),
+                FilledButton(
+                   onPressed: () async {
+                      // Save
+                      final path = ref.read(projectProvider).currentProjectPath;
+                      if (path != null) {
+                         await ref.read(projectProvider.notifier).saveProject(path, currentChronometer: _currentChronometerTotal);
+                         if (mounted) Navigator.of(context).pop(true);
+                      } else {
+                         // Save As...
+                         // We can't easily trigger Save As UI from here without proper context logic
+                         // but let's try.
+                         final result = await FilePicker.platform.saveFile(
+                              dialogTitle: 'Salvar Projeto',
+                              fileName: 'meu_album.alem',
+                              type: FileType.custom,
+                              allowedExtensions: ['alem', 'json'],
+                         );
+                         if (result != null) {
+                            await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: _currentChronometerTotal);
+                            if (mounted) Navigator.of(context).pop(true);
+                         } else {
+                            if (mounted) Navigator.of(context).pop(false);
+                         }
+                      }
+                   },
+                   child: const Text("Salvar e Sair"),
+                )
+             ],
+          )
+        );
+        
+        if (shouldClose == true) {
+           await windowManager.destroy();
+        }
+     } else {
+        // "Are you sure?"
+        final shouldClose = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+             title: const Text("Sair"),
+             content: const Text("Deseja realmente fechar o programa?"),
+             actions: [
+                TextButton(
+                   onPressed: () => Navigator.of(context).pop(false),
+                   child: const Text("Não"),
+                ),
+                FilledButton(
+                   onPressed: () => Navigator.of(context).pop(true),
+                   child: const Text("Sim"),
+                )
+             ],
+          )
+        );
+        if (shouldClose == true) {
+           await windowManager.destroy();
+        }
+     }
   }
 
   Future<void> _initializeStandardTemplates(WidgetRef ref) async {
@@ -123,10 +218,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
   final ScrollController _galleryScrollCtrl = ScrollController();
 
   // Toolbar State
-  Offset _toolbarPos = const Offset(100, 100);
+  Offset? _toolbarPos; // Null = Default centered above timeline
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     _thumbScrollController.dispose();
     _transformationController.dispose();
     
@@ -139,7 +235,64 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     _isBottomDockFloating.dispose();
     _bottomDockPos.dispose();
     _showBottomSnap.dispose();
+    _stopwatchTimer?.cancel();
     super.dispose();
+  }
+
+  // --- Chronometer (Stopwatch) Logic ---
+  final Stopwatch _projectStopwatch = Stopwatch();
+  Duration _chronometerOffset = Duration.zero; // Time from saved project
+  Timer? _stopwatchTimer;
+  String _stopwatchDisplay = "00:00:00";
+  bool _isStopwatchRed = false; 
+
+  Duration get _currentChronometerTotal => _chronometerOffset + _projectStopwatch.elapsed;
+
+  void _startStopwatch({bool reset = false}) {
+     if (reset) {
+        _projectStopwatch.reset();
+        _chronometerOffset = Duration.zero;
+     } 
+     _projectStopwatch.start();
+     _stopwatchTimer?.cancel();
+     _stopwatchTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (mounted) {
+           setState(() {
+              _stopwatchDisplay = _formatDuration(_currentChronometerTotal);
+           });
+        }
+     });
+  }
+
+  void _stopStopwatch() {
+     _projectStopwatch.stop();
+     _stopwatchTimer?.cancel();
+     setState(() {}); 
+  }
+
+  void _resetStopwatch() {
+     _projectStopwatch.reset();
+     _chronometerOffset = Duration.zero;
+     setState(() {
+        _stopwatchDisplay = "00:00:00";
+     });
+  }
+  
+  void _syncChronometerFromProject(Project p) {
+      _stopwatchTimer?.cancel();
+      _projectStopwatch.stop();
+      _projectStopwatch.reset();
+      _chronometerOffset = p.chronometerTime;
+      _stopwatchDisplay = _formatDuration(_chronometerOffset);
+      // Don't auto-start? Or should we? User usually controls it.
+      setState((){});
+  }
+
+  String _formatDuration(Duration d) {
+     String twoDigits(int n) => n.toString().padLeft(2, "0");
+     String twoDigitMinutes = twoDigits(d.inMinutes.remainder(60));
+     String twoDigitSeconds = twoDigits(d.inSeconds.remainder(60));
+     return "${twoDigits(d.inHours)}:$twoDigitMinutes:$twoDigitSeconds";
   }
 
   void _scrollToIndex(int index) {
@@ -183,8 +336,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
            // We can use DPI here if needed, e.g. store in project state
            // Currently initializeProject takes (w, h, count)
            // TODO: Add DPI to project model if required later
-           ref.read(projectProvider.notifier).initializeProject(width, height, 1);
-           Navigator.pop(context);
+            ref.read(projectProvider.notifier).initializeProject(width, height, 1);
+            _startStopwatch(reset: true);
+            Navigator.pop(context);
         },
       ),
     );
@@ -216,6 +370,10 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
     final state = ref.watch(projectProvider);
     final isProcessing = state.isProcessing;
 
+    // Window Title Sync
+    ref.listen<bool>(projectProvider.select((s) => s.isDirty), (_, __) => _updateWindowTitle());
+    ref.listen<String>(projectProvider.select((s) => s.project.name), (_, __) => _updateWindowTitle());
+
     // Auto-fit when Page Index changes
     ref.listen<int>(
       projectProvider.select((s) => s.project.currentPageIndex),
@@ -241,11 +399,59 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       }
     );
 
+    // Auto-scroll Libraries when Photo is selected on Canvas
+    ref.listen<String?>(
+      projectProvider.select((s) => s.selectedPhotoId),
+      (prev, next) {
+        if (next != null) {
+          final s = ref.read(projectProvider);
+          final notifier = ref.read(projectProvider.notifier);
+          
+          String? targetPath;
+          for (var page in s.project.pages) {
+            try {
+              targetPath = page.photos.firstWhere((p) => p.id == next).path;
+              break;
+            } catch (_) {}
+          }
+          
+          if (targetPath != null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (_browserScrollCtrl.hasClients) {
+                final displayedPaths = notifier.getSortedAndFilteredPaths();
+                final index = displayedPaths.indexOf(targetPath!);
+                if (index != -1) {
+                  final row = (index ~/ 3).toDouble();
+                  final targetOffset = (row * 110.0).clamp(0, _browserScrollCtrl.position.maxScrollExtent).toDouble();
+                  _browserScrollCtrl.animateTo(targetOffset, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+                }
+              }
+              if (_galleryScrollCtrl.hasClients) {
+                final index = s.project.allImagePaths.indexOf(targetPath!);
+                if (index != -1) {
+                   final row = (index ~/ 3).toDouble();
+                   final targetOffset = (row * 110.0).clamp(0, _galleryScrollCtrl.position.maxScrollExtent).toDouble();
+                   _galleryScrollCtrl.animateTo(targetOffset, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+                }
+              }
+            });
+          }
+        }
+      }
+    );
 
+
+
+    // Sync Stopwatch on Project Load
+    ref.listen<String>(projectProvider.select((s) => s.project.id), (prev, next) {
+        if (prev != next) {
+           _syncChronometerFromProject(ref.read(projectProvider).project);
+        }
+    });
 
     return CallbackShortcuts(
       bindings: {
-         const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => _handleSave(context, ref),
+         const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => _handleSave(context, ref, currentChronometer: _currentChronometerTotal),
          const SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true): () => _handleSaveAs(context, ref),
          const SingleActivator(LogicalKeyboardKey.keyN, control: true): () => _showNewProjectDialog(context, ref),
          const SingleActivator(LogicalKeyboardKey.keyN, control: true, shift: true): _handleNewInstance,
@@ -281,7 +487,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
          const SingleActivator(LogicalKeyboardKey.arrowLeft, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('left'),
          const SingleActivator(LogicalKeyboardKey.arrowUp, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('up'),
          const SingleActivator(LogicalKeyboardKey.arrowDown, control: true, shift: true): () => ref.read(projectProvider.notifier).selectAdjacentPhoto('down'),
-      },
+
+          // Global Page Deletion Shortcut
+          const SingleActivator(LogicalKeyboardKey.delete, shift: true): () {
+              final s = ref.read(projectProvider);
+              if (s.multiSelectedPages.isNotEmpty) {
+                  ref.read(projectProvider.notifier).removeSelectedPages();
+              } else {
+                  ref.read(projectProvider.notifier).removePage(s.project.currentPageIndex);
+              }
+          },
+       },
       child: Focus(
         autofocus: true, 
         child: Scaffold(
@@ -394,12 +610,27 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                  ],
                ),
                
-               // Touch Controls Overlay (Draggable)
-               Positioned(
-                 left: _toolbarPos.dx,
-                 top: _toolbarPos.dy,
-                 child: _buildTouchControls(context, ref, state),
-               ),
+                // Touch Controls Overlay (Draggable)
+                () {
+                   final Size screenSize = MediaQuery.of(context).size;
+                   Offset actualPos;
+                   if (_toolbarPos != null) {
+                      actualPos = _toolbarPos!;
+                   } else {
+                      // Default: Bottom Center, above bottom panel
+                      // 300 is estimated width of toolbar, 50 is guestimate height
+                      final double toolbarW = 400; 
+                      final double x = (screenSize.width - toolbarW) / 2;
+                      final double y = screenSize.height - _bottomPanelHeight - 60; // 60px above bottom panel
+                      actualPos = Offset(x, y);
+                   }
+                   
+                   return Positioned(
+                      left: actualPos.dx,
+                      top: actualPos.dy,
+                      child: _buildTouchControls(context, ref, state),
+                   );
+                }(),
                
                if (isProcessing)
                  Positioned.fill(
@@ -620,7 +851,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         );
         
         ref.read(projectProvider.notifier).setProject(newProject);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Diagramação Concluída!")));
+          _startStopwatch(reset: true);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Diagramação Concluída!")));
         
      } catch (e) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Erro: $e")));
@@ -937,71 +1169,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       padding: const EdgeInsets.symmetric(horizontal: 0), // MenuBar has its own padding
       child: Row( // Use a Row to combine MenuBar and IconButtons
         children: [
-          MenuBar(
-              style: MenuStyle(
-                 backgroundColor: MaterialStateProperty.all(Colors.transparent),
-                 elevation: MaterialStateProperty.all(0),
-                 padding: MaterialStateProperty.all(const EdgeInsets.symmetric(horizontal: 8)),
-              ),
-              children: [
-                 SubmenuButton(
-                   menuChildren: [
-                     MenuItemButton(
-                        onPressed: () => _showNewProjectDialog(context, ref),
-                        shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true),
-                        child: const MenuAcceleratorLabel("&Novo Projeto..."),
-                     ),
-                     MenuItemButton(
-                        onPressed: () => _handleLoad(context, ref), // Corrected method name
-                        shortcut: const SingleActivator(LogicalKeyboardKey.keyO, control: true),
-                        child: const MenuAcceleratorLabel("&Abrir..."),
-                     ),
-                     MenuItemButton(
-                        onPressed: () => _handleSave(context, ref),
-                        shortcut: const SingleActivator(LogicalKeyboardKey.keyS, control: true),
-                        child: const MenuAcceleratorLabel("&Salvar"),
-                     ),
-                     MenuItemButton(
-                        onPressed: () => _handleSaveAs(context, ref),
-                        shortcut: const SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true),
-                        child: const MenuAcceleratorLabel("Sa&lvar Como..."),
-                     ),
-                     const Divider(),
-                     MenuItemButton(
-                        onPressed: () => _handlePackProject(context, ref),
-                        child: const MenuAcceleratorLabel("&Empacotar Projeto (Smart Preview)..."),
-                     ),
-                     const Divider(),
-                     SubmenuButton( // Nested submenu for Exports
-                        menuChildren: [
-                           MenuItemButton(
-                              onPressed: () => _handleExportJpg(context, ref),
-                              child: const MenuAcceleratorLabel("&JPG (Todas as Páginas)"),
-                           ),
-                           MenuItemButton(
-                              onPressed: () => _handleExportPdf(context, ref),
-                              child: const MenuAcceleratorLabel("&PDF (Álbum Completo)"),
-                           ),
-                        ],
-                        child: const MenuAcceleratorLabel("&Exportar"),
-                     ),
-                     const Divider(),
-                     MenuItemButton(
-                        onPressed: () => _handleNewInstance(),
-                        shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true, shift: true),
-                        child: const MenuAcceleratorLabel("Nova &Janela"),
-                     ),
-                     MenuItemButton(
-                        onPressed: () => SystemNavigator.pop(),
-                        child: const MenuAcceleratorLabel("Sai&r"),
-                     ),
-                   ],
-                   child: const MenuAcceleratorLabel("&Arquivo"),
-                 ),
-                 // We can accept other menus here (Edit, View, etc.)
-              ],
-          ),
-          // The rest of the toolbar buttons
+          // File Operations
           IconButton(
              icon: const Icon(Icons.note_add_outlined, color: Colors.white70), 
              tooltip: "New Project",
@@ -1018,6 +1186,8 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
              onPressed: () => _handleSave(context, ref)
           ),
           const VerticalDivider(indent: 8, endIndent: 8, color: Colors.white24),
+
+          // Export Operations
           IconButton(
              icon: const Icon(Icons.picture_as_pdf_outlined, color: Colors.redAccent),
              tooltip: "Export PDF",
@@ -1030,6 +1200,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ),
           const VerticalDivider(indent: 8, endIndent: 8, color: Colors.white24),
 
+          // Page Operations
           IconButton(
              icon: const Icon(Icons.check_box_outline_blank, color: Colors.white70), 
              tooltip: "Add Placeholder Box",
@@ -1045,9 +1216,12 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           IconButton(
              icon: const Icon(Icons.add_box_outlined, color: Colors.white70), 
              tooltip: "Add Page",
-             onPressed: () => ref.read(projectProvider.notifier).addPage()
-          ),
-          IconButton(
+              onPressed: () => ref.read(projectProvider.notifier).addPage()
+           ),
+           const VerticalDivider(indent: 8, endIndent: 8, color: Colors.white24),
+
+           // Layout Operations
+           IconButton(
              icon: const Icon(Icons.auto_awesome_mosaic, color: Colors.tealAccent), 
              tooltip: "Auto Layout (Cycle Options)",
              onPressed: () {
@@ -1222,7 +1396,6 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                 );
              },
           ),
-          const Spacer(),
           IconButton(
             icon: const Icon(Icons.undo, color: Colors.white70), 
             onPressed: canUndo ? () => ref.read(projectProvider.notifier).undo() : null,
@@ -1648,7 +1821,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       opacity: 0.7,
                       child: SizedBox(
                         width: 60, height: 60,
-                        child: RotatedBox(quarterTurns: rot ~/ 90, child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain)),
+                        child: RotatedBox(quarterTurns: rot ~/ 90, child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain, cacheWidth: 200)),
                       ),
                     ),
                     child: GestureDetector(
@@ -1687,7 +1860,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                             child: Center(
                               child: RotatedBox(
                                 quarterTurns: rot ~/ 90,
-                                child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain),
+                                child: SmartImage(path: path, key: ValueKey('${path}_$version'), fit: BoxFit.contain, cacheWidth: 200),
                               ),
                             ),
                           ),
@@ -1831,6 +2004,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
        } catch (_) {}
     }
 
+    // Get Sorted Photos (by TimeShift/Date)
+    final sortedProjectPhotos = ref.read(projectProvider.notifier).getProjectPhotosSortedByDate();
+
     return Column(
       children: [
         // Properties Section
@@ -1878,14 +2054,6 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                       ),
                       const SizedBox(width: 8),
                       IconButton(
-                        icon: const Icon(Icons.rotate_90_degrees_ccw, size: 16, color: Colors.white70),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                        tooltip: "Girar 180°",
-                        onPressed: () => ref.read(projectProvider.notifier).rotateSelectedGalleryPhotos(180),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
                         icon: const Icon(Icons.rotate_right, size: 16, color: Colors.white70),
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(),
@@ -1910,9 +2078,9 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                         crossAxisSpacing: 4, 
                         mainAxisSpacing: 4
                       ),
-                    itemCount: state.project.allImagePaths.length,
+                    itemCount: sortedProjectPhotos.length,
                     itemBuilder: (ctx, i) {
-                      final path = state.project.allImagePaths[i];
+                      final path = sortedProjectPhotos[i];
                       final isSelected = state.selectedBrowserPaths.contains(path);
                       final rotation = state.project.imageRotations[path] ?? 0;
                       final usageCount = state.photoUsage[path] ?? 0;
@@ -1925,7 +2093,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
                             width: 80, height: 80,
                             child: Transform.rotate(
                               angle: (math.pi / 180) * rotation,
-                              child: SmartImage(path: path, fit: BoxFit.cover),
+                              child: SmartImage(
+                                path: path, 
+                                fit: BoxFit.cover,
+                                cacheWidth: 200,
+                              ),
                             ),
                           ),
                         ),
@@ -2004,7 +2176,16 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       return GestureDetector(
          onPanUpdate: (details) {
             setState(() {
-               _toolbarPos += details.delta;
+               if (_toolbarPos == null) {
+                  // Initialize from dynamic position if first drag
+                  final Size screenSize = MediaQuery.of(context).size;
+                  final double toolbarW = 400;
+                  final double x = (screenSize.width - toolbarW) / 2;
+                  final double y = screenSize.height - _bottomPanelHeight - 60;
+                  _toolbarPos = Offset(x, y) + details.delta;
+               } else {
+                  _toolbarPos = _toolbarPos! + details.delta;
+               }
             });
          },
          child: Container(
@@ -2020,7 +2201,55 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
             child: Row(
                mainAxisSize: MainAxisSize.min,
                children: [
-                   // Precision Mode
+                    // Chronometer
+                    Container(
+                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                       decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(15),
+                       ),
+                       child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                             const Icon(Icons.timer_outlined, size: 14, color: Colors.amberAccent),
+                             const SizedBox(width: 6),
+                             Text(
+                                _stopwatchDisplay,
+                                style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                             ),
+                             const SizedBox(width: 4),
+                             IconButton(
+                                icon: Icon(
+                                   _projectStopwatch.isRunning ? Icons.pause_circle : Icons.play_circle,
+                                   color: _projectStopwatch.isRunning ? Colors.redAccent : Colors.greenAccent,
+                                   size: 20,
+                                ),
+                                constraints: const BoxConstraints(),
+                                padding: EdgeInsets.zero,
+                                tooltip: _projectStopwatch.isRunning ? "Parar" : "Iniciar",
+                                onPressed: () {
+                                   if (_projectStopwatch.isRunning) {
+                                      _stopStopwatch();
+                                   } else {
+                                      _startStopwatch();
+                                   }
+                                },
+                             ),
+                             IconButton(
+                                icon: const Icon(Icons.refresh, color: Colors.white54, size: 16),
+                                constraints: const BoxConstraints(),
+                                padding: EdgeInsets.zero,
+                                tooltip: "Reiniciar",
+                                onPressed: _resetStopwatch,
+                             ),
+                          ],
+                       ),
+                    ),
+                    const SizedBox(width: 12),
+                    Container(width: 1, height: 24, color: Colors.white24),
+                    const SizedBox(width: 12),
+
+                    // Precision Mode
                    IconButton(
                       icon: Icon(
                          Icons.gps_fixed, // Target / Precision
@@ -2511,47 +2740,35 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
         ),
         
         Expanded(
-          child: CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.delete, shift: true): () {
-            if (state.multiSelectedPages.isNotEmpty) {
-                ref.read(projectProvider.notifier).removeSelectedPages();
-            } else {
-                ref.read(projectProvider.notifier).removePage(state.project.currentPageIndex);
-            }
-        },
-      },
-      child: Focus(
-        autofocus: false,
-        child: Builder(
-          builder: (context) {
-            return Listener(
-            onPointerSignal: (event) {
-              if (event is PointerScrollEvent) {
-                // If vertical scroll (dy) is detected but no horizontal scroll (dx),
-                // map it to horizontal scroll for the timeline.
-                if (event.scrollDelta.dy != 0 && event.scrollDelta.dx == 0) {
-                   final double newOffset = _thumbScrollController.offset + event.scrollDelta.dy;
-                   if (newOffset >= _thumbScrollController.position.minScrollExtent &&
-                       newOffset <= _thumbScrollController.position.maxScrollExtent) {
-                       _thumbScrollController.jumpTo(newOffset);
-                   }
-                }
-              }
-            },
-            child: Scrollbar(
-              controller: _thumbScrollController,
-              thumbVisibility: true,
-              thickness: 12, // Thicker for touch
-              radius: const Radius.circular(6),
-              interactive: true,
-              child: ReorderableListView.builder(
-              scrollController: _thumbScrollController,
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-              itemCount: state.project.pages.length,
-              buildDefaultDragHandles: false,
-              onReorder: (oldIndex, newIndex) => ref.read(projectProvider.notifier).reorderPage(oldIndex, newIndex),
+          child: Focus(
+            autofocus: false,
+            child: Builder(
+              builder: (context) {
+                return Listener(
+                onPointerSignal: (event) {
+                  if (event is PointerScrollEvent) {
+                    if (event.scrollDelta.dy != 0 && event.scrollDelta.dx == 0) {
+                       final double newOffset = _thumbScrollController.offset + event.scrollDelta.dy;
+                       if (newOffset >= _thumbScrollController.position.minScrollExtent &&
+                           newOffset <= _thumbScrollController.position.maxScrollExtent) {
+                           _thumbScrollController.jumpTo(newOffset);
+                       }
+                    }
+                  }
+                },
+                child: Scrollbar(
+                  controller: _thumbScrollController,
+                  thumbVisibility: true,
+                  thickness: 12,
+                  radius: const Radius.circular(6),
+                  interactive: true,
+                  child: ReorderableListView.builder(
+                scrollController: _thumbScrollController,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                itemCount: state.project.pages.length,
+                buildDefaultDragHandles: false,
+                onReorder: (oldIndex, newIndex) => ref.read(projectProvider.notifier).reorderPage(oldIndex, newIndex),
               itemBuilder: (context, index) {
                 final page = state.project.pages[index];
                 final isCurrent = state.project.currentPageIndex == index;
@@ -2702,18 +2919,17 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
           ),
         );
       },
-              )
-             )
-            );
-            },
+                ),
+               ),
+              );
+              },
+            ),
           ),
         ),
-      ),
-    ),
       ],
     ),
   );
-  }
+}
 
   void _showBrowserContextMenu(BuildContext context, WidgetRef ref, String path, Offset globalPos) {
       final RenderBox? overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
@@ -2841,21 +3057,21 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
 
   // --- Handlers ---
 
-  Future<void> _handleSave(BuildContext context, WidgetRef ref) async {
+  Future<void> _handleSave(BuildContext context, WidgetRef ref, {Duration? currentChronometer}) async {
     final state = ref.read(projectProvider);
     if (state.currentProjectPath != null && state.currentProjectPath!.isNotEmpty) {
       // Overwrite existing file
-      await ref.read(projectProvider.notifier).saveProject(state.currentProjectPath!);
+      await ref.read(projectProvider.notifier).saveProject(state.currentProjectPath!, currentChronometer: currentChronometer);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto salvo!")));
       }
     } else {
       // If no file path, behave like Save As
-      await _handleSaveAs(context, ref);
+      await _handleSaveAs(context, ref, currentChronometer: currentChronometer);
     }
   }
 
-  Future<void> _handleSaveAs(BuildContext context, WidgetRef ref) async {
+  Future<void> _handleSaveAs(BuildContext context, WidgetRef ref, {Duration? currentChronometer}) async {
     final result = await FilePicker.platform.saveFile(
       dialogTitle: "Salvar Como",
       fileName: "album_smart_preview.alem",
@@ -2863,7 +3079,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       type: FileType.custom,
     );
     if (result != null) {
-      await ref.read(projectProvider.notifier).saveProject(result);
+      await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: currentChronometer);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto salvo com sucesso!")));
       }
@@ -2907,10 +3123,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> {
       type: FileType.custom,
       allowedExtensions: ['alem', 'json'],
     );
-    if (result != null && result.files.single.path != null) {
+       if (result != null && result.files.single.path != null) {
       final success = await ref.read(projectProvider.notifier).loadProject(result.files.single.path!);
       if (mounted) {
         if (success) {
+           _startStopwatch(reset: true);
            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Projeto carregado com sucesso!")));
         } else {
            ScaffoldMessenger.of(context).showSnackBar(

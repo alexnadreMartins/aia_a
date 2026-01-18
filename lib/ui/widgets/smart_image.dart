@@ -9,12 +9,16 @@ class SmartImage extends ConsumerWidget {
   final String path;
   final BoxFit fit;
   final Widget? errorBuilder;
+  final int? cacheWidth;
+  final int? cacheHeight;
 
   const SmartImage({
     super.key, 
     required this.path, 
     this.fit = BoxFit.cover,
     this.errorBuilder,
+    this.cacheWidth,
+    this.cacheHeight,
   });
 
   @override
@@ -42,6 +46,8 @@ class SmartImage extends ConsumerWidget {
          file, 
          key: ValueKey('${path}_$version'), // Rebuild widget
          fit: fit, 
+         cacheWidth: cacheWidth,
+         cacheHeight: cacheHeight,
          errorBuilder: (_,__,___) => errorBuilder ?? const SizedBox()
        ));
     }
@@ -60,6 +66,8 @@ class SmartImage extends ConsumerWidget {
                  proxyFile, 
                  key: ValueKey('${proxyPath}_$pVersion'),
                  fit: fit, 
+                 cacheWidth: cacheWidth,
+                 cacheHeight: cacheHeight,
                  errorBuilder: (_,__,___) => errorBuilder ?? const SizedBox()
                ),
                // Mini Cloud Icon for Thumbnails

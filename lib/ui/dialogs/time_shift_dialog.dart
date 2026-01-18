@@ -115,10 +115,20 @@ class _TimeShiftDialogState extends ConsumerState<TimeShiftDialog> {
   String _getCameraKey(String path) {
       final meta = _metaCache[path];
       if (meta == null) return "Unknown";
+      
+      // 1. Model + Serial (Best)
+      final model = meta.cameraModel ?? "Unknown";
       if (meta.cameraSerial != null && meta.cameraSerial!.isNotEmpty) {
-          return "${meta.cameraModel ?? 'Unknown'}_${meta.cameraSerial}";
+          return "${model}_${meta.cameraSerial}";
       }
-      return meta.cameraModel ?? "Unknown";
+      
+      // 2. Model + Artist (Fallback if Serial missing)
+      if (meta.artist != null && meta.artist!.isNotEmpty) {
+          return "${model}_${meta.artist}";
+      }
+      
+      // 3. Just Model (Worst)
+      return model;
   }
 
   void _handleSmartReorder(String srcPath, String targetPath) {
