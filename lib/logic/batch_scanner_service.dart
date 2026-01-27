@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:exif/exif.dart';
 import 'package:path/path.dart' as p;
+import 'package:archive/archive_io.dart';
 import '../models/batch_image_model.dart';
 import 'dart:async';
 
@@ -34,7 +35,23 @@ class BatchScannerService {
 
       for (var pFile in projectFiles) {
           try {
-             final content = pFile.readAsStringSync();
+             String content;
+             // Try ZIP first (Standard .alem)
+             try {
+                final bytes = pFile.readAsBytesSync();
+                final archive = ZipDecoder().decodeBytes(bytes);
+                final jsonFile = archive.findFile('project.json');
+                if (jsonFile != null) {
+                   content = utf8.decode(jsonFile.content as List<int>);
+                } else {
+                   // Fallback: Maybe it IS a JSON file (Legacy)
+                   content = utf8.decode(bytes);
+                }
+             } catch (_) {
+                // Last Resort: Read as text (Legacy/Corrupt)
+                content = pFile.readAsStringSync(encoding: latin1);
+             }
+             
              final jsonMap = jsonDecode(content);
              
              // Extract Pages

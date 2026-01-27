@@ -2345,68 +2345,53 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
     final String lastUser = effectiveUser?.name ?? Platform.environment['USERNAME'] ?? Platform.environment['USER'] ?? "Editor";
     final String userCategory = effectiveUser?.role ?? "Editor";
     final String company = effectiveUser?.company ?? "Unknown"; 
-    // Ideally we track company ID in project. But let's assume Project model keeps it simple for now. 
-    // Wait, project.company field exists in Firestore `saveProjectStats` logic but usually NOT in local Project model.
-    // The `Project` model in `project_model.dart` DOES have `company` field? Let's check view_file from earlier.
-    // Step 3541 line 2423... doesn't show model definition.
-    // Assuming `Project` model MIGHT update `lastUser`.
-    
-    // Update Project Object with new stats
+
+    // Calculate Name from Path (Synced with Filename)
+    final name = path.split(Platform.pathSeparator).last;
+    final nameNoExt = name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
+
+    // Update Project Object with new stats AND Name
     final updatedProject = state.project.copyWith(
+        name: nameNoExt, // Update Name Here!
         totalEditingTime: newTotalTime,
         chronometerTime: currentChronometer ?? state.project.chronometerTime,
         sourcePhotoCounts: sourceStats,
         usedPhotoCounts: usedStats,
         lastUser: lastUser,
         userCategory: userCategory, 
-        company: company, // If Project model has this. If not, FirestoreService fetches it using lastUser ID. 
-        // We'll trust FirestoreService.saveProjectStats logic which fetches userDoc.
-        // BUT if we want to save LOCAL JSON with correct attribution, we should update it here.
+        company: company, 
     );
 
     // Save Stats to Firestore (Buffered)
-    // We await this now to catch potential errors in saving metadata
     try {
-       // Passing existing metadata cache (from TimeShift/Preload) to avoid re-extraction failures
        await FirestoreService().saveProjectStats(updatedProject, metadataCache: _metadataCache);
     } catch (e) {
        debugPrint("Failed to save project stats to Firestore: $e");
     }
     
-    // Update State temporarily to reflect saved stats (and so toJson uses them)
-    // Note: We don't change 'state' broadly to avoid UI flicker, but we need these values in the saved file.
-    
     try {
       if (path.toLowerCase().endsWith('.alem')) {
-          // Check if we are in "Offline/Proxy Mode" or simply have proxies available
           if (state.proxyRoot != null && await Directory(state.proxyRoot!).exists()) {
              debugPrint("Updating Smart Preview Package using existing proxies...");
              await ProjectPackager.updatePackage(updatedProject, state.proxyRoot!, path, onProgress: (c, t, s) {
                 if (c % 10 == 0) debugPrint(s);
              });
           } else {
-             // Standard Full Pack (Resizing Originals)
              debugPrint("Saving as Smart Preview Package (Full Repack)...");
              await ProjectPackager.packProject(updatedProject, path);
           }
       } else {
-          // Standard JSON
           final jsonStr = jsonEncode(updatedProject.toJson());
           await File(path).writeAsString(jsonStr);
       }
       
-      // Update Project Name from Filename (if it's not the default "New Project" or if we want to sync them)
-      // Usually "Save As" implies renaming the project context.
-      final name = path.split(Platform.pathSeparator).last;
-      final nameNoExt = name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
-      
       state = state.copyWith(
           currentProjectPath: path,
-          project: updatedProject.copyWith(name: nameNoExt),
+          project: updatedProject,
           isDirty: false,
       );
       
-      _updateUndoRedoFlags(); // Just to refresh state if needed
+      _updateUndoRedoFlags(); 
       debugPrint("Project saved to $path with name $nameNoExt");
     } catch (e) {
       debugPrint("Error saving project: $e");

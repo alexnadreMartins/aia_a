@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:convert';
+import 'dart:convert';
 import 'package:path/path.dart' as p;
+import 'package:archive/archive_io.dart';
 import '../models/project_model.dart';
 import '../models/asset_model.dart';
 import 'image_utils.dart';
@@ -33,7 +35,27 @@ class ReferenceEngine {
        try {
            print("RD: Analyzing reference candidate: ${fs.path}");
            final file = File(fs.path);
-           final jsonStr = await file.readAsString();
+           String jsonStr;
+           try {
+             final bytes = await file.readAsBytes();
+             // Try ZIP First
+             try {
+                final archive = ZipDecoder().decodeBytes(bytes);
+                final jsonFile = archive.findFile('project.json');
+                if (jsonFile != null) {
+                   jsonStr = utf8.decode(jsonFile.content as List<int>);
+                } else {
+                   jsonStr = utf8.decode(bytes);
+                }
+             } catch (_) {
+                // Not a zip, try plain text
+                jsonStr = await file.readAsString();
+             }
+           } catch (_) {
+             // Fallback
+             jsonStr = await file.readAsString(encoding: latin1);
+           }
+           
            final jsonMap = jsonDecode(jsonStr);
            final project = Project.fromJson(jsonMap);
            

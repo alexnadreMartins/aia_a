@@ -8,9 +8,11 @@ import '../../models/batch_image_model.dart';
 import '../editor/image_editor_view.dart';
 import '../../logic/editor/editor_state.dart';
 import '../../logic/batch_processor.dart';
+import 'package:path/path.dart' as path;
 
 class BatchEditorView extends StatefulWidget {
-  const BatchEditorView({Key? key}) : super(key: key);
+  final List<String>? projectImages;
+  const BatchEditorView({Key? key, this.projectImages}) : super(key: key);
 
   @override
   State<BatchEditorView> createState() => _BatchEditorViewState();
@@ -38,6 +40,12 @@ class _BatchEditorViewState extends State<BatchEditorView> {
   @override
   void initState() {
     super.initState();
+    if (widget.projectImages != null && widget.projectImages!.isNotEmpty) {
+       // Auto-load project images if provided
+       WidgetsBinding.instance.addPostFrameCallback((_) {
+          _loadProjectImages();
+       });
+    }
   }
 
   Future<void> _pickFolder() async {
@@ -72,7 +80,7 @@ class _BatchEditorViewState extends State<BatchEditorView> {
       setState(() {
         _rootPath = selectedDirectory;
         _isLoading = true;
-        _statusMessage = onlyUsed ? "Scanning project files..." : "Scanning all files...";
+        _statusMessage = onlyUsed ? "Buscando arquivos do projeto..." : "Buscando todos os arquivos...";
       });
 
       // 1. Scan Files
@@ -81,7 +89,7 @@ class _BatchEditorViewState extends State<BatchEditorView> {
       if (mounted) {
         setState(() {
           _allImages = images;
-          _statusMessage = "Found ${images.length} images. Enriching Metadata...";
+          _statusMessage = "Encontradas ${images.length} imagens. Analisando Metadados...";
           _groupImages();
         });
       }
@@ -91,22 +99,71 @@ class _BatchEditorViewState extends State<BatchEditorView> {
          if (mounted) {
              setState(() {
                 _allImages = enriched;
-                _statusMessage = "Ready (${_allImages.length} images)";
+                _statusMessage = "Pronto (${_allImages.length} imagens)";
                 _groupImages(); // Re-group with new data
                 _isLoading = false;
              });
          }
       });
     }
+    }
+
+
+  Future<void> _loadProjectImages() async {
+      if (widget.projectImages == null || widget.projectImages!.isEmpty) {
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Nenhuma imagem no projeto para importar.")));
+         return;
+      }
+
+      setState(() {
+         _isLoading = true;
+         _statusMessage = "Carregando ${widget.projectImages!.length} imagens do projeto...";
+         // Reset root path as this is a scattered set
+         _rootPath = "Projeto Atual";
+      });
+
+      // Convert paths to BatchImage
+      final images = widget.projectImages!.map((path) {
+          // Try to get date from file synchronously for speed, or just null
+          DateTime? date;
+          try { date = File(path).lastModifiedSync(); } catch (_) {}
+          
+          return BatchImage(
+             path: path,
+             dateCaptured: date,
+             cameraModel: null,
+             brightness: 0.5
+          );
+      }).toList();
+
+      if (mounted) {
+        setState(() {
+          _allImages = images;
+          _statusMessage = "Enriquecendo metadados...";
+          _groupImages();
+        });
+      }
+
+       // Background Enrich
+      BatchScannerService.enrichMetadata(images).then((enriched) {
+         if (mounted) {
+             setState(() {
+                _allImages = enriched;
+                _statusMessage = "Pronto (${_allImages.length} imagens do Projeto)";
+                _groupImages();
+                _isLoading = false;
+             });
+         }
+      });
   }
 
   void _groupImages() {
      _groupedImages.clear();
      if (_groupBy == 'none') {
-        _groupedImages['All Images'] = _allImages;
+        _groupedImages['Todas as Imagens'] = _allImages;
      } else if (_groupBy == 'date') {
         for (var img in _allImages) {
-           String key = "Unknown Date";
+           String key = "Data Desconhecida";
            if (img.dateCaptured != null) {
               key = DateFormat('yyyy-MM-dd').format(img.dateCaptured!);
            }
@@ -114,7 +171,7 @@ class _BatchEditorViewState extends State<BatchEditorView> {
         }
      } else if (_groupBy == 'camera') {
         for (var img in _allImages) {
-           String key = img.cameraModel ?? "Unknown Camera";
+           String key = img.cameraModel ?? "Câmera Desconhecida";
            _groupedImages.putIfAbsent(key, () => []).add(img);
         }
      } else if (_groupBy == 'tone') {
@@ -138,7 +195,7 @@ class _BatchEditorViewState extends State<BatchEditorView> {
         // Optional: clear selection?
         // _selectedPaths.clear(); 
      });
-     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Added ${_selectedPaths.length} to $batchName")));
+     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("$batchName: ${_selectedPaths.length} imagens adicionadas")));
   }
 
   void _openEditor() async {
@@ -182,10 +239,30 @@ class _BatchEditorViewState extends State<BatchEditorView> {
                padding: const EdgeInsets.only(right: 16.0),
                child: Text(_statusMessage, style: const TextStyle(fontSize: 12, color: Colors.amber)),
              )),
-           IconButton(
-             icon: const Icon(Icons.create_new_folder),
-             onPressed: _pickFolder,
-             tooltip: "Select Folder",
+           if (_isLoading)
+             Center(child: Padding(
+               padding: const EdgeInsets.only(right: 16.0),
+               child: Text(_statusMessage, style: const TextStyle(fontSize: 12, color: Colors.amber)),
+             )),
+           
+           PopupMenuButton<String>(
+              icon: const Icon(Icons.folder_open),
+              tooltip: "Importar Imagens",
+              onSelected: (val) {
+                 if (val == 'folder') _pickFolder();
+                 if (val == 'project') _loadProjectImages();
+              },
+              itemBuilder: (context) => [
+                 const PopupMenuItem(
+                    value: 'folder',
+                    child: ListTile(leading: Icon(Icons.create_new_folder), title: Text("Abrir Pasta")),
+                 ),
+                 if (widget.projectImages != null && widget.projectImages!.isNotEmpty)
+                   const PopupMenuItem(
+                      value: 'project',
+                      child: ListTile(leading: Icon(Icons.photo_album), title: Text("Carregar do Projeto")),
+                   ),
+              ]
            ),
         ],
       ),
@@ -300,7 +377,7 @@ class _BatchEditorViewState extends State<BatchEditorView> {
                                       onPressed: () {
                                          _addToBatch(name);
                                       },
-                                      tooltip: "Add Selected Images Here",
+                                      tooltip: "Adicionar imagens selecionadas",
                                     ),
                                   ),
                                   // Preview first few?
@@ -410,12 +487,14 @@ class _BatchEditorViewState extends State<BatchEditorView> {
      
      // 3. Run (null outputDir = overwrite)
      final stream = BatchProcessor.processBatch(toProcess, null);
-     int total = toProcess.length;
      
-     await for (int completed in stream) {
+     BatchProgress? finalProgress;
+
+     await for (final update in stream) {
+        finalProgress = update;
         if (mounted) {
            setState(() {
-              _progress = completed / total;
+              _progress = update.processedCount / update.totalCount;
            });
         }
      }
@@ -425,8 +504,53 @@ class _BatchEditorViewState extends State<BatchEditorView> {
            _isProcessing = false;
            _progress = 0.0;
         });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Sucesso! $total imagens foram atualizadas.")));
-        
+
+        // Show Results Dialog
+        if (finalProgress != null) {
+           final failures = finalProgress.failedPaths;
+           final successCount = finalProgress.processedCount - failures.length; // processedCount includes failures in current logic? 
+           // logic/batch_processor.dart increments completed in 'finally', so processedCount = success + failure
+           
+           showDialog(
+             context: context, 
+             builder: (ctx) => AlertDialog(
+                backgroundColor: const Color(0xFF333333),
+                title: Text(failures.isEmpty ? "Sucesso Total!" : "Processamento Concluído com Erros", 
+                   style: TextStyle(color: failures.isEmpty ? Colors.greenAccent : Colors.redAccent)),
+                content: Column(
+                   mainAxisSize: MainAxisSize.min,
+                   crossAxisAlignment: CrossAxisAlignment.start,
+                   children: [
+                      Text("Processadas: ${finalProgress!.processedCount} / ${finalProgress!.totalCount}", style: const TextStyle(color: Colors.white)),
+                      const SizedBox(height: 8),
+                      Text("Total Salvas: $successCount", style: const TextStyle(color: Colors.green)),
+                      if (failures.isNotEmpty) ...[
+                         Text("Falhas: ${failures.length}", style: const TextStyle(color: Colors.red)),
+                         const SizedBox(height: 16),
+                         const Text("Arquivos com erro:", style: TextStyle(color: Colors.white70, fontSize: 12)),
+                         Container(
+                           height: 100,
+                           width: double.maxFinite,
+                           padding: const EdgeInsets.all(8),
+                           margin: const EdgeInsets.only(top: 4),
+                           color: Colors.black26,
+                           child: ListView.builder(
+                             itemCount: failures.length,
+                             itemBuilder: (c, i) => Text(path.basename(failures[i]), style: const TextStyle(color: Colors.redAccent, fontSize: 11)),
+                           ),
+                         )
+                      ]
+                   ],
+                ),
+                actions: [
+                   FilledButton(
+                      onPressed: () => Navigator.pop(ctx), 
+                      child: const Text("OK")
+                   )
+                ],
+             )
+           );
+        }
      }
   }
 

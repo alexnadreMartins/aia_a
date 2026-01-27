@@ -163,12 +163,18 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
                          // Save As...
                          // We can't easily trigger Save As UI from here without proper context logic
                          // but let's try.
-                         final result = await FilePicker.platform.saveFile(
-                              dialogTitle: 'Salvar Projeto',
-                              fileName: 'meu_album.alem',
-                              type: FileType.custom,
-                              allowedExtensions: ['alem', 'json'],
-                         );
+                          // Sanitize Project Name
+                          String defaultName = ref.read(projectProvider).project.name;
+                          defaultName = defaultName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+                          if (defaultName.isEmpty || defaultName == "New Project") defaultName = "meu_album";
+                          if (!defaultName.toLowerCase().endsWith('.alem')) defaultName += ".alem";
+
+                          final result = await FilePicker.platform.saveFile(
+                               dialogTitle: 'Salvar Projeto',
+                               fileName: defaultName,
+                               type: FileType.custom,
+                               allowedExtensions: ['alem', 'json'],
+                          );
                          if (result != null) {
                             await ref.read(projectProvider.notifier).saveProject(result, currentChronometer: _currentChronometerTotal, currentUser: ref.read(userProfileProvider).value);
                             if (mounted) Navigator.of(context).pop(true);
@@ -1171,8 +1177,11 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
   }
 
   void _showBatchEditor(BuildContext context) {
+    // Get all project images
+    final projectImages = ref.read(projectProvider).project.allImagePaths.toList();
+    
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (context) => BatchEditorView())
+      MaterialPageRoute(builder: (context) => BatchEditorView(projectImages: projectImages))
     );
   }
 
@@ -2805,7 +2814,7 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
                 final double thumbHeight = 110.0;
                 final double thumbWidth = thumbHeight * pageAspectRatio;
 
-                return ReorderableDelayedDragStartListener(
+                return CustomReorderableDelayedDragStartListener(
                   index: index,
                   key: ValueKey(page.id),
                   child: GestureDetector(
@@ -3135,9 +3144,20 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
        await _promptAndSetContractNumber(context, ref);
     }
 
+    // Sanitize Project Name for Filename
+    String defaultName = state.project.name;
+    // Basic sanitization
+    defaultName = defaultName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+    if (defaultName.isEmpty || defaultName == "New Project") {
+       defaultName = "meu_album";
+    }
+    if (!defaultName.toLowerCase().endsWith('.alem')) {
+       defaultName += ".alem";
+    }
+
     final result = await FilePicker.platform.saveFile(
       dialogTitle: "Salvar Como",
-      fileName: "album_smart_preview.alem",
+      fileName: defaultName,
       allowedExtensions: ['alem', 'json'],
       type: FileType.custom,
     );
@@ -3969,6 +3989,20 @@ class _PhotoBookHomeState extends ConsumerState<PhotoBookHome> with WindowListen
    }
 }
 
+class CustomReorderableDelayedDragStartListener extends ReorderableDragStartListener {
+  const CustomReorderableDelayedDragStartListener({
+    Key? key,
+    required Widget child,
+    required int index,
+    bool enabled = true,
+  }) : super(key: key, child: child, index: index, enabled: enabled);
+
+  @override
+  MultiDragGestureRecognizer createRecognizer() {
+    return DelayedMultiDragGestureRecognizer(delay: const Duration(seconds: 1), debugOwner: this);
+  }
+}
+
 class _NewProjectDialog extends StatefulWidget {
   final Function(double width, double height, int dpi) onCreate;
   const _NewProjectDialog({required this.onCreate});
@@ -3978,8 +4012,8 @@ class _NewProjectDialog extends StatefulWidget {
 }
 
 class _NewProjectDialogState extends State<_NewProjectDialog> {
-  // Presets in CM
-  final List<Map<String, dynamic>> presets = [
+  // Presets in CM (Static to persist during session)
+  static final List<Map<String, dynamic>> _savedPresets = [
     {"label": "Padrão (30.5 x 21.5)", "w": 30.5, "h": 21.5},
     {"label": "Quadrado (30 x 30)", "w": 30.0, "h": 30.0},
     {"label": "Quadrado Grande (35 x 35)", "w": 35.0, "h": 35.0},
@@ -3989,13 +4023,18 @@ class _NewProjectDialogState extends State<_NewProjectDialog> {
 
   int _selectedIndex = 0;
   bool _isHorizontal = true;
+  bool _isCustom = false;
+  
   final TextEditingController _dpiCtrl = TextEditingController(text: "300");
+  final TextEditingController _wCtrl = TextEditingController(text: "30.0");
+  final TextEditingController _hCtrl = TextEditingController(text: "20.0");
+  final TextEditingController _nameCtrl = TextEditingController(text: "");
 
   @override
   Widget build(BuildContext context) {
     // Current base dimensions
-    double baseW = presets[_selectedIndex]["w"];
-    double baseH = presets[_selectedIndex]["h"];
+    double baseW = _isCustom ? (double.tryParse(_wCtrl.text) ?? 20.0) : _savedPresets[_selectedIndex]["w"];
+    double baseH = _isCustom ? (double.tryParse(_hCtrl.text) ?? 20.0) : _savedPresets[_selectedIndex]["h"];
     
     // Apply orientation logic
     double finalW = _isHorizontal ? (baseW > baseH ? baseW : baseH) : (baseW < baseH ? baseW : baseH);
@@ -4004,6 +4043,10 @@ class _NewProjectDialogState extends State<_NewProjectDialog> {
     if ((baseW - baseH).abs() < 0.1) {
        finalW = baseW; finalH = baseH;
     }
+    
+    // Auto-update Custom fields if relying on toggle
+    // Not needed for inputs, but if we toggle orientation, it just flips finalW/H.
+    // Inputs stay as "Base Dimensions".
 
     return AlertDialog(
       backgroundColor: const Color(0xFF2C2C2C),
@@ -4024,23 +4067,94 @@ class _NewProjectDialogState extends State<_NewProjectDialog> {
                ),
                child: DropdownButtonHideUnderline(
                  child: DropdownButton<int>(
-                   value: _selectedIndex,
+                   value: _isCustom ? -1 : _selectedIndex,
                    isExpanded: true,
                    dropdownColor: const Color(0xFF333333),
                    style: const TextStyle(color: Colors.white),
                    icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
-                   items: List.generate(presets.length, (i) {
+                   items: [
+                      ...List.generate(_savedPresets.length, (i) {
                       return DropdownMenuItem(
                         value: i,
-                        child: Text(presets[i]["label"]),
+                        child: Text(_savedPresets[i]["label"]),
                       );
                    }),
+                      const DropdownMenuItem(
+                        value: -1,
+                        child: Text("Personalizado..."),
+                      )
+                   ],
                    onChanged: (val) {
-                     if (val != null) setState(() => _selectedIndex = val);
+                     setState(() {
+                        if (val == -1) {
+                           _isCustom = true;
+                        } else {
+                           _isCustom = false;
+                           _selectedIndex = val!;
+                        }
+                     });
                    },
                  ),
                ),
              ),
+             
+             if (_isCustom) ...[
+                const SizedBox(height: 12),
+                Row(
+                   children: [
+                      Expanded(
+                        child: TextField(
+                           controller: _wCtrl,
+                           keyboardType: TextInputType.number,
+                           decoration: const InputDecoration(labelText: "Largura (cm)", filled: true, fillColor: Colors.white10),
+                           style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                           controller: _hCtrl,
+                           keyboardType: TextInputType.number,
+                           decoration: const InputDecoration(labelText: "Altura (cm)", filled: true, fillColor: Colors.white10),
+                           style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                   ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                   children: [
+                      Expanded(
+                        child: TextField(
+                           controller: _nameCtrl,
+                           decoration: const InputDecoration(labelText: "Nome do Modelo (Opcional)", filled: true, fillColor: Colors.white10),
+                           style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.save, color: Colors.greenAccent),
+                        tooltip: "Salvar Modelo",
+                        onPressed: () {
+                           if (_wCtrl.text.isNotEmpty && _hCtrl.text.isNotEmpty) {
+                              final w = double.tryParse(_wCtrl.text) ?? 0;
+                              final h = double.tryParse(_hCtrl.text) ?? 0;
+                              final name = _nameCtrl.text.isEmpty ? "Personalizado (${w}x${h})" : _nameCtrl.text;
+                              
+                              setState(() {
+                                 _savedPresets.add({
+                                    "label": name,
+                                    "w": w,
+                                    "h": h
+                                 });
+                                 _selectedIndex = _savedPresets.length - 1;
+                                 _isCustom = false;
+                              });
+                           }
+                        },
+                      )
+                   ]
+                )
+             ],
              const SizedBox(height: 16),
              Row(
                children: [
@@ -4120,6 +4234,8 @@ class _NewProjectDialogState extends State<_NewProjectDialog> {
     );
   }
 }
+
+
 
 
 
