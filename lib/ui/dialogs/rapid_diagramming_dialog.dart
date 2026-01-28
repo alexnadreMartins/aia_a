@@ -138,7 +138,8 @@ class _RapidDiagrammingDialogState extends State<RapidDiagrammingDialog> {
                  'batchPath': _selectedBatchPath,
                  'templatePath': _customTemplatePath,
                  'referencePath': _referencePath,
-                 'useAutoSelect': _useAutoSelect
+                 'useAutoSelect': _useAutoSelect,
+                 'contractNumber': _contractNumber
               });
            },
            icon: const Icon(Icons.flash_on),

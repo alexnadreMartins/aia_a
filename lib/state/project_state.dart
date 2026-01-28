@@ -2197,14 +2197,14 @@ class ProjectNotifier extends StateNotifier<PhotoBookState> {
           }
 
           // Dynamic Sizing
-          final labelHeight = page.widthMm * 0.015;
-          final estTextWidth = labelText.length * (labelHeight * 0.65) + (page.widthMm * 0.02);
+          final labelHeight = page.widthMm * 0.022; // Increased height significantly
+          final estTextWidth = labelText.length * (labelHeight * 0.55) + (page.widthMm * 0.02); // Adjusted char width factor since height increased
           final labelWidth = estTextWidth > (page.widthMm * 0.2) ? estTextWidth : (page.widthMm * 0.2); // Min 20% width
 
           final label = PhotoItem(
             id: Uuid().v4(),
-            x: photo.x, // Align with photo X
-            y: photo.y + photo.height + 2, // 2mm padding
+            x: page.widthMm - labelWidth - 5, // 5mm from right
+            y: page.heightMm - labelHeight - 5, // 5mm from bottom
             width: labelWidth,
             height: labelHeight,
             path: "",

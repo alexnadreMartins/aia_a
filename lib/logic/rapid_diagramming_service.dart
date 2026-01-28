@@ -372,23 +372,27 @@ class RapidDiagrammingService {
     // --- LABELING LOGIC (LAST STEP) ---
     if (contractNumber != null && contractNumber.isNotEmpty && newPages.isNotEmpty) {
         // Defines
-        double textW = pW * 0.30; // Increased width to fit Name
         double textH = pH * 0.02; 
         
         // Format: "Contract - Name - 01"
         final String labelTextStart = "$contractNumber - $projectName - 01";
         final String labelTextEnd = "$contractNumber - $projectName - End";
         
+        // Helper to estimate width based on char count (approx aspect 0.6)
+        double _estimateW(String text) => text.length * (textH * 0.6) + 10; // +10mm buffer
+
         // 1. Tag First Page
         final p1 = newPages[0];
+        final w1 = _estimateW(labelTextStart);
+        
         final label1 = PhotoItem(
            id: Uuid().v4(),
            path: "",
            text: labelTextStart,
            isText: true,
-           x: p1.widthMm - textW - 5, 
-           y: p1.heightMm - textH - 5, 
-           width: textW,
+           x: p1.widthMm - w1 - 50, // 50mm from right
+           y: p1.heightMm - textH - 50, // 50mm from bottom
+           width: w1,
            height: textH,
            zIndex: 100
         );
@@ -400,14 +404,16 @@ class RapidDiagrammingService {
         // 2. Tag Last Page
         if (newPages.length > 1) {
             final pLast = newPages[newPages.length - 1];
+            final wLast = _estimateW(labelTextEnd);
+            
             final labelLast = PhotoItem(
                id: Uuid().v4(),
                path: "",
                text: labelTextEnd,
                isText: true,
-               x: pLast.widthMm - textW - 5,
-               y: pLast.heightMm - textH - 5,
-               width: textW,
+               x: pLast.widthMm - wLast - 50,
+               y: pLast.heightMm - textH - 50,
+               width: wLast,
                height: textH,
                zIndex: 100
             );
